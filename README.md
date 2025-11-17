@@ -92,9 +92,9 @@ for Windows users:
 - Make sure you can control your service with "sc", e.g. by stopping and restarting your service with these two powershell commands:
 
 ```
-sc stop \<service_name\>
+sc stop <service_name>
 
-sc start \<service_name\>
+sc start <service_name>
 ```
 
 If your service does not stop/start then you may try move your wrapper executable to a stable system path (_e.g. C:\\Tools\\nssm\\nssm.exe_) and update the binPath to the new wrapper path. This usually fix it.
@@ -176,3 +176,4 @@ By enabling UseScheme and specifying a SchemeFile, you can define lines in the f
 - If a line is invalid, the entire scheme is marked as "invalid" and UseScheme is disabled; the plugin prints errors and falls back to default logic.
 
 - Rule processing is sequential: the first matching rule determines the action.
+
