@@ -102,21 +102,21 @@ If your service does not stop/start then you may try move your wrapper executabl
 - Have your service autorestart on default but not on exit codes 0, 4294967295, 3221225786. You also need to be sure that stopping the service does not kill child processes and that standard windows failure procedures are disabled for your rust service (_note: your service will still restart on crash or unexpected exits, so you are safe to go_) On NSSM you do it by typing the following powershell commands as admin:
 
 ```
-nssm set RustServer AppExit Default Restart
+nssm set <service_name> AppExit Default Restart
 
-nssm set RustServer AppExit 0 Exit
+nssm set <service_name> AppExit 0 Exit
 
-nssm set RustServer AppExit 4294967295 Exit
+nssm set <service_name> AppExit 4294967295 Exit
 
-nssm set RustServer AppExit 3221225786 Exit
+nssm set <service_name> AppExit 3221225786 Exit
 
-nssm set RustServer AppStopMethodSkip 6
+nssm set <service_name> AppStopMethodSkip 6
 
-nssm set RustServer AppStopMethodConsole 60000
+nssm set <service_name> AppStopMethodConsole 60000
 
-sc.exe failureflag RustServer 0
+sc.exe failureflag <service_name> 0
 
-reg delete "HKLM\\SYSTEM\\CurrentControlSet\\Services\\RustServer" /v FailureActions /f
+reg delete "HKLM\\SYSTEM\\CurrentControlSet\\Services\\<service_name>" /v FailureActions /f
 ```
 
 For Linux users:
@@ -176,4 +176,5 @@ By enabling UseScheme and specifying a SchemeFile, you can define lines in the f
 - If a line is invalid, the entire scheme is marked as "invalid" and UseScheme is disabled; the plugin prints errors and falls back to default logic.
 
 - Rule processing is sequential: the first matching rule determines the action.
+
 
