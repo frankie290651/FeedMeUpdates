@@ -134,7 +134,7 @@ NoNewPrivileges=false
 ```
 You also need to add the start command to nopasswd so that updater can restart your service once update is over, here are the commands:
 ```
-# change USERNAME with the username of the user running the service and SERVICE with your service name
+# change USERNAME value with the username of the user running the service and SERVICE value with your service name
 USERNAME="user"
 SERVICE="rust-server.service"
 SYSTEMCTL_PATH="$(command -v systemctl)"
@@ -185,6 +185,7 @@ By enabling UseScheme and specifying a SchemeFile, you can define lines in the f
 - If a line is invalid, the entire scheme is marked as "invalid" and UseScheme is disabled; the plugin prints errors and falls back to default logic.
 
 - Rule processing is sequential: the first matching rule determines the action.
+
 
 
 
