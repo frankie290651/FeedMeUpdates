@@ -154,9 +154,8 @@ sudo systemctl daemon-reload
 - Both on Windows and on Linux if you set RustOnService true the updater will be ran in background, overriding the ShowUpdaterConsole value.
 - On Windows, the plugin runs the updater creating a new visible window if ShowUpdaterConsole is true, otherwise in background if false.
 - On Linux, if ShowUpdaterConsole is false the updater is run in background, if true the plugin tries to run it in the following ways (_in order of attempt; if both fail it runs in background_):
-
-- Opening a new shell window if GNOME-terminal is installed
-- Creating a new tmux session if tmux is installed (_session name: feedmeupdates_)
+  1) Opening a new shell window if GNOME-terminal is installed
+  2) Creating a new tmux session if tmux is installed (_session name: feedmeupdates_)
 
 **Advanced "Scheme" (Custom Rules)**
 
@@ -185,6 +184,7 @@ By enabling UseScheme and specifying a SchemeFile, you can define lines in the f
 - If a line is invalid, the entire scheme is marked as "invalid" and UseScheme is disabled; the plugin prints errors and falls back to default logic.
 
 - Rule processing is sequential: the first matching rule determines the action.
+
 
 
 
