@@ -83,7 +83,7 @@ When the updater is started it writes a log (updater.log) in the server folder; 
 
 **NOTE on service configuration**:
 
-Currently FeedMeUpdates ONLY supports service wrappers that allow management of specific exit codes (_e.g., NSSM in Windows and systemd in Linux_).
+Currently FeedMeUpdates ONLY supports service wrappers that allow management of specific exit codes (_e.g., NSSM in Windows and systemd in Linux_) and ONLY supports services that run RustDedicated directly without scripts.
 
 Below is what's needed for the system to work correctly:
 
@@ -121,28 +121,37 @@ reg delete "HKLM\\SYSTEM\\CurrentControlSet\\Services\\<service_name>" /v Failur
 
 For Linux users:
 
-Recommended unit settings:
+Be sure to have these lines in your service ini:
 
 ```
-\# Graceful stop and don't kill child processes
-
-KillSignal=SIGINT
-
+[Service]
 KillMode=process
-
+KillSignal=SIGINT
 SendSIGKILL=no
-
-TimeoutStopSec=60s
-
-\# Restart ONLY on crash/abnormal termination (not on voluntary exits)
-
-Restart=on-abnormal
-
-RestartSec=5s
+Restart=on-failure
+SuccessExitStatus=0 9 SIGKILL
+NoNewPrivileges=false
+```
+You also need to add the start command to nopasswd so that updater can restart your service once update is over, here are the commands:
+```
+# change USERNAME with the username of the user running the service and SERVICE with your service name
+USERNAME="user"
+SERVICE="rust-server.service"
+SYSTEMCTL_PATH="$(command -v systemctl)"
+# now we add a rule to skip sudo password just for start command
+echo "${USERNAME} ALL=(root) NOPASSWD: ${SYSTEMCTL_PATH} start ${SERVICE}" | sudo tee /etc/sudoers.d/${SERVICE%.service}-start >/dev/null
+sudo chown root:root /etc/sudoers.d/${SERVICE%.service}-start
+sudo chmod 0440 /etc/sudoers.d/${SERVICE%.service}-start
+sudo visudo -c -f /etc/sudoers.d/${SERVICE%.service}-start
+# now we make sure your ini is properly configured with NoNewPrivileges set to false and then relead the service file
+sudo mkdir -p /etc/systemd/system/${SERVICE}.d
+printf "[Service]\nNoNewPrivileges=false\n" | sudo tee /etc/systemd/system/${SERVICE}.d/override.conf >/dev/null
+sudo systemctl daemon-reload
 ```
 
 **Note about updater execution**:
 
+- Both on Windows and on Linux if you set RustOnService true the updater will be ran in background, overriding the ShowUpdaterConsole value.
 - On Windows, the plugin runs the updater creating a new visible window if ShowUpdaterConsole is true, otherwise in background if false.
 - On Linux, if ShowUpdaterConsole is false the updater is run in background, if true the plugin tries to run it in the following ways (_in order of attempt; if both fail it runs in background_):
 
@@ -176,5 +185,6 @@ By enabling UseScheme and specifying a SchemeFile, you can define lines in the f
 - If a line is invalid, the entire scheme is marked as "invalid" and UseScheme is disabled; the plugin prints errors and falls back to default logic.
 
 - Rule processing is sequential: the first matching rule determines the action.
+
 
 
