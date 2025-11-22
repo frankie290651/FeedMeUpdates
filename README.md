@@ -207,7 +207,7 @@ nssm set <service_name> AppStopMethodConsole 60000
 
 # Disable Windows failure recovery
 sc.exe failureflag <service_name> 0
-reg delete "HKLM\\SYSTEM\\CurrentControlSet\\Services\\<service_name>" /v FailureActions /f
+reg delete "HKLM\SYSTEM\CurrentControlSet\Services\<service_name>" /v FailureActions /f
 ```
 
 Verify service control:
