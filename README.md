@@ -2,7 +2,7 @@
 
 **FeedMeUpdates**
 
-FeedMeUpdates is a highly configurable automatic update system for Rust and Oxide servers. It consists of a plugin running on Oxide framework and an executable responsible for performing the actual update, which gets called by the plugin when needed.
+FeedMeUpdates is a highly configurable automatic update orchestrator for Rust and Oxide servers. It consists of a plugin running on Oxide framework and an executable responsible for performing the actual update, which gets called by the plugin when needed.
 
 **Features**
 
@@ -13,8 +13,8 @@ FeedMeUpdates is a highly configurable automatic update system for Rust and Oxid
 - Automatic backup and restore in case of failure
 - Notification to a Discord channel on start and result of the update
 - Configurable to run in background or visible (console)
-- Configurable for servers run via batch/script
-- Configurable for servers run as a service
+- Configurable for servers ran via batch/script
+- Configurable for servers ran as a service
 - Entirely cross-platform (Windows/Linux)
 
 **Requirements**
@@ -32,6 +32,7 @@ FeedMeUpdates is a highly configurable automatic update system for Rust and Oxid
 - Copy the FeedMeUpdates.json configuration file to the oxide config folder
 - Copy FeedMeUpdates.exe (_FeedMeUpdates without extension on Linux_) to the server folder
 - Open the previously copied FeedMeUpdates.json configuration file and configure it (_see configuration section_)
+- Make sure your service or your starting script is properly configured (_see notes below about either script or service configuration_).
 - Start the server
 - On first startup, the plugin will force the server to shut down, run the updater, and restart the server.
 
@@ -47,7 +48,7 @@ When the updater is started it writes a log (updater.log) in the server folder; 
 
 `UpdaterExecutablePath` (_e.g. "C:\\rust-server\\FeedMeUpdates.exe" or on linux "/home/rust/rust-server/FeedMeUpdates"_): Enter the full path to the FeedMeUpdates executable here
 
-`ServerStartScript` (_e.g. "C:\\rust-server\\start_server.bat" or on linux "/home/rust/rust-server/start_server.sh"_): Enter the full path to the server start script here (note: if you run the server as a service you can ignore this field)
+`ServerStartScript` (_e.g. "C:\\rust-server\\start_server.bat" or on linux "/home/rust/rust-server/start_server.sh"_): Enter the full path to the server start script here (note: if you run the server as a service you can ignore this field otherwide please read the note on script configuration)
 
 `RustOnService` (_default is set to false_): Set to true only if you run the server as a service (_important, see service configuration note_)
 
@@ -80,6 +81,9 @@ When the updater is started it writes a log (updater.log) in the server folder; 
 `DailyRestartTime` (_default is ""_): If your server performs daily restarts (_which is recommended!_), specify the restart time here (_in HH:mm format, between 00:00 and 23:59_)
 
 `MinutesBeforeRestart` (_default is 60_): Number of minutes before daily restart to stop periodic update checks (_ignore if your server doesn't do daily restarts_)
+
+**NOTE on script configuration**:
+A server start script is provided for both Windows (_.bat_) and linux (_.sh_) and need to be configured with starting parameters if you want to use it. In case you prefer to use your own script, if it contains automatic restarting logic you need to change it to not restart when lock file is present inside server directory (_updating.lock_). If you don't know how to do it then use the ones provided. This is very important because updates will always fail if your server is running while the updater does is job.
 
 **NOTE on service configuration**:
 
@@ -184,6 +188,7 @@ By enabling UseScheme and specifying a SchemeFile, you can define lines in the f
 - If a line is invalid, the entire scheme is marked as "invalid" and UseScheme is disabled; the plugin prints errors and falls back to default logic.
 
 - Rule processing is sequential: the first matching rule determines the action.
+
 
 
 
