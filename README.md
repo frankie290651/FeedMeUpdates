@@ -1,4 +1,4 @@
-![alt text](FeedMeWallpaper2.png)
+![alt text](Img/FeedMeWallpaper2.png)
 
 **FeedMeUpdates**
 
@@ -188,6 +188,7 @@ By enabling UseScheme and specifying a SchemeFile, you can define lines in the f
 - If a line is invalid, the entire scheme is marked as "invalid" and UseScheme is disabled; the plugin prints errors and falls back to default logic.
 
 - Rule processing is sequential: the first matching rule determines the action.
+
 
 
 
