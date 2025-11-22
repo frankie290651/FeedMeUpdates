@@ -207,7 +207,7 @@ nssm set <service_name> AppStopMethodConsole 60000
 
 # Disable Windows failure recovery
 sc.exe failureflag <service_name> 0
-reg delete "HKLM\SYSTEM\CurrentControlSet\Services\<service_name>" /v FailureActions /f
+reg delete "HKLM\\SYSTEM\\CurrentControlSet\\Services\\<service_name>" /v FailureActions /f
 ```
 
 Verify service control:
@@ -216,7 +216,7 @@ sc stop <service_name>
 sc start <service_name>
 ```
 
-If service control fails, move NSSM to a stable path (e.g., `C:\Tools\nssm\nssm.exe`) and update the service binPath.
+If service control fails, move NSSM to a stable path (e.g., `C:\\Tools\\nssm\\nssm.exe`) and update the service binPath.
 
 ### Linux (systemd)
 Add these directives to your service unit file:
