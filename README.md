@@ -133,7 +133,7 @@ It minimizes downtime while providing flexible rules and safe rollback behavior.
 | SteamCmdPath | required | Full path to `steamcmd` | Needed for server updates |
 | UpdaterExecutablePath | required | Full path to updater executable | Invoked by plugin |
 | ShowUpdaterConsole | false | Try visible console window | Ignored if `RustOnService=true` |
-| ServerStartScript | (none) | Startup script path | Unused if using service |
+| ServerStartScript | "" | Startup script path | Unused if using service |
 | RunServerScriptHidden | true | Hide startup script console | Linux may attempt GNOME terminal / tmux |
 | ServerTmuxSession | "" | tmux session name (Linux) | Only when visible launch |
 | RustOnService | false | Set true if server runs as a service | Requires exit code config |
@@ -287,13 +287,10 @@ A: The updater restores the backup automatically and writes failure details to t
 A: Yes, set `UpdatePlugins` to `false`.
 
 **Q: How do I test the updater without affecting my live server?**  
-A: Use the `feedme.testrun` command in-game (admin only).
+A: You must test on a copy of your server. The `feedme.testrun` command performs a real update attempt on the server where it's run.
 
 **Q: Does FeedMeUpdates work with modded versions of Oxide?**  
 A: It works with standard Oxide distributions. Custom Oxide builds may require adjustments.
-
-**Q: Can I use this on a containerized server?**  
-A: Yes, but ensure the container has access to SteamCMD and proper file permissions.
 
 ## 15. Contributing
 Contributions are welcome! Please follow this workflow:
