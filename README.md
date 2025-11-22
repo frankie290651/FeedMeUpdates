@@ -42,45 +42,55 @@ When the updater is started it writes a log (updater.log) in the server folder; 
 
 **Configuration**
 
-`ServerDirectory` (_e.g. "C:\\rust-server" or on linux "/home/rust/rust-server"_): Enter the path to your Rust server here (_where RustDedicated is located_)
+`ServerDirectory` (_e.g. "C:\\rust-server" or on linux "/home/rust/rust-server"_): Enter the path to your Rust server here (_where RustDedicated is located_).
 
-`SteamCmdPath` (_e.g. "C:\\steamcmd\\steamcmd.exe" or on linux "/usr/games/steamcmd"_): Enter the full path to the steamcmd executable here
+`SteamCmdPath` (_e.g. "C:\\steamcmd\\steamcmd.exe" or on linux "/usr/games/steamcmd"_): Enter the full path to the steamcmd executable here.
 
-`UpdaterExecutablePath` (_e.g. "C:\\rust-server\\FeedMeUpdates.exe" or on linux "/home/rust/rust-server/FeedMeUpdates"_): Enter the full path to the FeedMeUpdates executable here
+`UpdaterExecutablePath` (_e.g. "C:\\rust-server\\FeedMeUpdates.exe" or on linux "/home/rust/rust-server/FeedMeUpdates"_): Enter the full path to the FeedMeUpdates executable here.
 
-`ServerStartScript` (_e.g. "C:\\rust-server\\start_server.bat" or on linux "/home/rust/rust-server/start_server.sh"_): Enter the full path to the server start script here (note: if you run the server as a service you can ignore this field otherwide please read the note on script configuration)
+`ShowUpdaterConsole` (_default is false_): If true, the system tries to launch the updater executable by opening a new console window (shell), otherwise it is always run in background (_important, read notes on updater execution_).
 
-`RustOnService` (_default is set to false_): Set to true only if you run the server as a service (_important, see service configuration note_)
+`ServerStartScript` (_e.g. "C:\\rust-server\\start_server.bat" or on linux "/home/rust/rust-server/start_server.sh"_): Enter the full path to the server start script here (_note: if you run the server as a service you can ignore this field otherwide please read the note on script configuration_).
 
-`ServiceName` (_default is set to ""_): Fill in with the name of the service (_only if running server as a service_)
+`RunServerScriptHidden` (_default is true_): If true, the updater will launch the server script hidden, thus server console will be hidden too. For linux users if set to false it will try GNOME terminal first if no tmux session specified inside ServerTmuxSession, if no GNOME terminal available or if it fails then it will try a tmux with default session name "rust-server". If ServerTmuxSession is set to a value then it will first try tmux with that session name, then GNOME terminal and default tmux session name as fallback. For Windows users if set to false it just make the server process visible.
 
-`CheckIntervalMinutes` (_default is 10_): Indicates how frequently to check for updates (minutes)
+`ServerTmuxSession` (_default is ""_): if specified, when updater restart your server with RunServerScriptHidden set to false then it will first try to use tmux with that specific session name. If Not specified or if it fails then it will try GNOME-terminal or tmux to a default session name "rust-server" (_only for linux users_).
 
-`CountdownMinutes` (_default is 5_): Number of minutes for the countdown with chat messages warning of server restart
+`RustOnService` (_default is set to false_): Set to true only if you run the server as a service (_important, see service configuration note_).
 
-`UpdatePlugins` (_default is false_): If set to true, the system will also update all installed plugins if more recent versions are found (_only Oxide plugins available on uMod_)
+`ServiceName` (_default is set to ""_): Fill in with the name of the service (_only if running server as a service_).
 
-`MarkersSubfolder` (_default is "markers"_): Subfolder name in the server folder to store marker files produced by updates (_if folder does not exist it will be created_).
-
-`OnlyServerProtocolUpdate` (_default is false_): If set to true, the system will update only in case of major updates (_both server and oxide updates must be available and must involve a protocol number change_)
+`ServiceType` (_default is set to ""_): Don't change it, is just for future implementatons.
 
 `StartupScan` (_default is true_): If true, the system will immediately search for updates and apply them after initialization; if false, this check is skipped and updates are only looked for during periodic checks.
 
-`ShowUpdaterConsole` (default is false): If true, the system tries to launch the updater executable by opening a new console window (shell), otherwise it is always run in background (_important, read notes on updater exec_ution)
+`MaxAttempts` (_default is 0_): Indicates how many update attempts are permitted to the plugin before it disables itself (_0=unlimited_).
 
-`MaxAttempts` (_default is 0_): Indicates how many update attempts are permitted to the plugin before it disables itself (_0=unlimited_)
+`CheckIntervalMinutes` (_default is 10_): Indicates how frequently to check for updates (minutes).
 
-`DiscordNotificationsEnabled` (_default is false_): If true, the plugin sends notification of update start and result to the desired Discord server/channel
+`CountdownMinutes` (_default is 5_): Number of minutes for the countdown with chat messages warning of server restart.
 
-`DiscordWebhookUrl` (_default is ""_): If DiscordNotificationsEnabled is true, specify the webhook URL for the bot here
+`UpdatePlugins` (_default is false_): If set to true, the system will also update all installed plugins if more recent versions are found (_only Oxide plugins available on uMod_).
+
+`OnlyServerProtocolUpdate` (_default is false_): If set to true, the system will update only in case of major updates (_both server and oxide updates must be available and must involve a protocol number change_).
 
 `UseScheme` (_default is false_): If true, the system tries to use the update logic expressed by the user in a specified schemefile; in case of loading or reading errors this feature disables itself and the system switches to default logic.
 
-`SchemeFile` (_default is ""_): If UseScheme is true, specify here the full path to the logic schema file
+`SchemeFile` (_default is ""_): If UseScheme is true, specify here the full path to the logic schema file.
 
-`DailyRestartTime` (_default is ""_): If your server performs daily restarts (_which is recommended!_), specify the restart time here (_in HH:mm format, between 00:00 and 23:59_)
+`DailyRestartTime` (_default is ""_): If your server performs daily restarts (_which is recommended!_), specify the restart time here (_in HH:mm format, between 00:00 and 23:59_).
 
-`MinutesBeforeRestart` (_default is 60_): Number of minutes before daily restart to stop periodic update checks (_ignore if your server doesn't do daily restarts_)
+`MinutesBeforeRestart` (_default is 60_): Number of minutes before daily restart to stop periodic update checks (_ignore if your server doesn't do daily restarts_).
+
+`DiscordNotificationsEnabled` (_default is false_): If true, the plugin sends notification of update start and result to the desired Discord server/channel.
+
+`DiscordWebhookUrl` (_default is ""_): If DiscordNotificationsEnabled is true, specify the webhook URL for the bot here.
+
+`UpdaterMarkerFileName` (_default is "updateresult.json"_): Don't change it, is just for future implementatons.
+
+`UpdaterLockFileName` (_"updating.lock"_): Don't change it, is just for future implementatons.
+
+`MarkersSubfolder` (_default is "markers"_): This is the name of the folder inside which used markers are stored for further consultation.
 
 **NOTE on script configuration**:
 A server start script is provided for both Windows (_.bat_) and linux (_.sh_) and need to be configured with starting parameters if you want to use it. In case you prefer to use your own script, if it contains automatic restarting logic you need to change it to not restart when lock file is present inside server directory (_updating.lock_). If you don't know how to do it then use the ones provided. This is very important because updates will always fail if your server is running while the updater does is job.
@@ -188,6 +198,7 @@ By enabling UseScheme and specifying a SchemeFile, you can define lines in the f
 - If a line is invalid, the entire scheme is marked as "invalid" and UseScheme is disabled; the plugin prints errors and falls back to default logic.
 
 - Rule processing is sequential: the first matching rule determines the action.
+
 
 
 
