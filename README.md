@@ -9,7 +9,7 @@
 [![Latest Release](https://img.shields.io/github/v/release/frankie290651/FeedMeUpdates)](https://github.com/frankie290651/FeedMeUpdates/releases)
 [![License](https://img.shields.io/github/license/frankie290651/FeedMeUpdates)](LICENSE)
 [![Issues](https://img.shields.io/github/issues/frankie290651/FeedMeUpdates)](https://github.com/frankie290651/FeedMeUpdates/issues)
-
+ 
 ## Table of Contents
 1. Overview  
 2. Features  
