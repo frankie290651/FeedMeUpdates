@@ -1,143 +1,226 @@
-![alt text](Imgs/FeedMeWallpaper.png)
+# FeedMeUpdates
 
-**FeedMeUpdates**
+> Automatic, configurable update orchestrator for Rust + Oxide servers: detects server / Oxide / plugin changes, performs safe backup, applies updates, restarts cleanly, and notifies Discord.
 
-FeedMeUpdates is a highly configurable automatic update orchestrator for Rust and Oxide servers. It consists of a plugin running on Oxide framework and an executable responsible for performing the actual update, which gets called by the plugin when needed.
+![Screenshot of FeedMeUpdates](Imgs/FeedMeWallpaper.png)
 
-**Features**
+<!-- Optional badges (uncomment once available) -->
+<!-- [![CI](https://github.com/frankie290651/FeedMeUpdates/actions/workflows/ci.yml/badge.svg)](https://github.com/frankie290651/FeedMeUpdates/actions/workflows/ci.yml) -->
+[![Latest Release](https://img.shields.io/github/v/release/frankie290651/FeedMeUpdates)](https://github.com/frankie290651/FeedMeUpdates/releases)
+[![License](https://img.shields.io/github/license/frankie290651/FeedMeUpdates)](LICENSE)
+[![Issues](https://img.shields.io/github/issues/frankie290651/FeedMeUpdates)](https://github.com/frankie290651/FeedMeUpdates/issues)
 
-- Automatic server update
+## Table of Contents
+1. Overview  
+2. Features  
+3. Architecture  
+4. Requirements  
+5. Quick Start  
+6. Installation  
+7. Configuration  
+   - Example JSON  
+   - Parameter Reference  
+8. Update Flow  
+9. Advanced: Scheme Rules  
+10. Service Integration  
+11. Discord Notifications  
+12. Error Handling & Debugging  
+13. Security & Permissions  
+14. FAQ  
+15. Contributing  
+16. License  
+17. Keywords / Discoverability  
+
+---
+
+## 1. Overview
+FeedMeUpdates consists of:
+- Oxide plugin (`FeedMeUpdates.cs`) coordinating detection, countdown, and server restart logic.
+- Companion executable (`FeedMeUpdates.exe` / `FeedMeUpdates` on Linux) performing backup, update tasks (Rust / Oxide / plugins), and writing result markers.
+
+It minimizes downtime while providing flexible rules and safe rollback behavior.
+
+## 2. Features
+- Automatic Rust server update (SteamCMD)
 - Automatic Oxide update
-- Automatic plugin updates
-- Fully configurable update management logic
-- Automatic backup and restore in case of failure
-- Notification to a Discord channel on start and result of the update
-- Configurable to run in background or visible (console)
-- Configurable for servers ran via batch/script
-- Configurable for servers ran as a service
-- Entirely cross-platform (Windows/Linux)
+- Optional uMod plugin updates
+- Backup & restore on failure
+- Discord webhook notifications (start + result)
+- In-game countdown (chat messages)
+- Cross-platform support (Windows / Linux)
+- Works with script-based or service-based startup
+- Custom rule engine ("Scheme") for conditional update decisions
+- Granular polling intervals and attempt limits
 
-**Requirements**
+## 3. Architecture (High-Level)
+```
+[Oxide Plugin]
+  ├─ Detects changes (server / Oxide / plugins)
+  ├─ Schedules update (countdown)
+  ├─ Invokes updater executable
+  └─ Reads markers & sends Discord notifications
 
-- Rust server with sufficient privileges to run applications
+[Updater Executable]
+  ├─ Creates backup
+  ├─ Applies Rust + Oxide updates
+  ├─ Optionally updates plugins
+  ├─ Writes marker & exit code
+  └─ Restarts server (script or service)
+```
+
+## 4. Requirements
+- Rust Dedicated server directory with permissions to spawn processes
 - Oxide installed
-- .NET 8 Framework (_only if using the non-standalone version_)
-- Enough disk space to create backup of the server
+- SteamCMD accessible and functional
+- .NET 8 Runtime (only for non-standalone build)
+- Enough free disk space to store a full backup of the server folder
 
-**Installation**
-
-- Shut down the server
-- Create a backup of the server (_delete it if there are no issues at the end of installation_)
-- Copy FeedMeUpdates.cs to the oxide plugins folder
-- Copy the FeedMeUpdates.json configuration file to the oxide config folder
-- Copy FeedMeUpdates.exe (_FeedMeUpdates without extension on Linux_) to the server folder
-- Open the previously copied FeedMeUpdates.json configuration file and configure it (_see configuration section_)
-- Make sure your service or your starting script is properly configured (_see notes below about either script or service configuration_).
-- Start the server
-- On first startup, the plugin will force the server to shut down, run the updater, and restart the server.
-
-**Debugging in case of errors**
-
-When the updater is started it writes a log (updater.log) in the server folder; you can check the log to understand where errors may have occurred. Before restarting the server (_whether the update succeeds or fails_), the updater generates a marker file in the server folder (_updateresult.json_). When the server restarts, the plugin automatically moves this marker file into the "markers" subfolder of the server folder, where it is kept for review. When moved to the markers folder, it is also renamed with the update_id of the call made by the plugin to the executable, making it easy to track. The possible update_id values are: "init" in case of the very first plugin execution (_as described in point 8 of the installation section_) which is necessary for correct system setup; "testrun" following an execution of the feedme.testrun command; or a randomly generated 8-digit string at the time of the plugin call to the executable. If you open a marker file with a text editor you'll find: "result", indicating update success or failure; "fail_reason", which indicates the reason for failure if any; and other fields useful for debugging (_e.g., success or failure of the update, temporary backup creation and/or restore in case of update failure, etc_).
-
-**Configuration**
-
-`ServerDirectory` (_e.g. "C:\\rust-server" or on linux "/home/rust/rust-server"_): Enter the path to your Rust server here (_where RustDedicated is located_).
-
-`SteamCmdPath` (_e.g. "C:\\steamcmd\\steamcmd.exe" or on linux "/usr/games/steamcmd"_): Enter the full path to the steamcmd executable here.
-
-`UpdaterExecutablePath` (_e.g. "C:\\rust-server\\FeedMeUpdates.exe" or on linux "/home/rust/rust-server/FeedMeUpdates"_): Enter the full path to the FeedMeUpdates executable here.
-
-`ShowUpdaterConsole` (_default is false_): If true, the system tries to launch the updater executable by opening a new console window (shell), otherwise it is always run in background (_important, read notes on updater execution_).
-
-`ServerStartScript` (_e.g. "C:\\rust-server\\start_server.bat" or on linux "/home/rust/rust-server/start_server.sh"_): Enter the full path to the server start script here (_note: if you run the server as a service you can ignore this field otherwide please read the note on script configuration_).
-
-`RunServerScriptHidden` (_default is true_): If true, the updater will launch the server script hidden, thus server console will be hidden too. For linux users if set to false it will try GNOME terminal first if no tmux session specified inside ServerTmuxSession, if no GNOME terminal available or if it fails then it will try a tmux with default session name "rust-server". If ServerTmuxSession is set to a value then it will first try tmux with that session name, then GNOME terminal and default tmux session name as fallback. For Windows users if set to false it just make the server process visible.
-
-`ServerTmuxSession` (_default is ""_): if specified, when updater restart your server with RunServerScriptHidden set to false then it will first try to use tmux with that specific session name. If Not specified or if it fails then it will try GNOME-terminal or tmux to a default session name "rust-server" (_only for linux users_).
-
-`RustOnService` (_default is set to false_): Set to true only if you run the server as a service (_important, see service configuration note_).
-
-`ServiceName` (_default is set to ""_): Fill in with the name of the service (_only if running server as a service_).
-
-`ServiceType` (_default is set to ""_): Don't change it, is just for future implementatons.
-
-`StartupScan` (_default is true_): If true, the system will immediately search for updates and apply them after initialization; if false, this check is skipped and updates are only looked for during periodic checks.
-
-`MaxAttempts` (_default is 0_): Indicates how many update attempts are permitted to the plugin before it disables itself (_0=unlimited_).
-
-`CheckIntervalMinutes` (_default is 10_): Indicates how frequently to check for updates (minutes).
-
-`CountdownMinutes` (_default is 5_): Number of minutes for the countdown with chat messages warning of server restart.
-
-`UpdatePlugins` (_default is false_): If set to true, the system will also update all installed plugins if more recent versions are found (_only Oxide plugins available on uMod_).
-
-`OnlyServerProtocolUpdate` (_default is false_): If set to true, the system will update only in case of major updates (_both server and oxide updates must be available and must involve a protocol number change_).
-
-`UseScheme` (_default is false_): If true, the system tries to use the update logic expressed by the user in a specified schemefile; in case of loading or reading errors this feature disables itself and the system switches to default logic.
-
-`SchemeFile` (_default is ""_): If UseScheme is true, specify here the full path to the logic schema file.
-
-`DailyRestartTime` (_default is ""_): If your server performs daily restarts (_which is recommended!_), specify the restart time here (_in HH:mm format, between 00:00 and 23:59_).
-
-`MinutesBeforeRestart` (_default is 60_): Number of minutes before daily restart to stop periodic update checks (_ignore if your server doesn't do daily restarts_).
-
-`DiscordNotificationsEnabled` (_default is false_): If true, the plugin sends notification of update start and result to the desired Discord server/channel.
-
-`DiscordWebhookUrl` (_default is ""_): If DiscordNotificationsEnabled is true, specify the webhook URL for the bot here.
-
-`UpdaterMarkerFileName` (_default is "updateresult.json"_): Don't change it, is just for future implementatons.
-
-`UpdaterLockFileName` (_"updating.lock"_): Don't change it, is just for future implementatons.
-
-`MarkersSubfolder` (_default is "markers"_): This is the name of the folder inside which used markers are stored for further consultation.
-
-**NOTE on script configuration**:
-A server start script is provided for both Windows (_.bat_) and linux (_.sh_) and need to be configured with starting parameters if you want to use it. In case you prefer to use your own script, if it contains automatic restarting logic you need to change it to not restart when lock file is present inside server directory (_updating.lock_). If you don't know how to do it then use the ones provided. This is very important because updates will always fail if your server is running while the updater does is job.
-
-**NOTE on service configuration**:
-
-Currently FeedMeUpdates ONLY supports service wrappers that allow management of specific exit codes (_e.g., NSSM in Windows and systemd in Linux_) and ONLY supports services that run RustDedicated directly without scripts.
-
-Below is what's needed for the system to work correctly:
-
-for Windows users:
-
-- Make sure you can control your service with "sc", e.g. by stopping and restarting your service with these two powershell commands:
-
-```
-sc stop <service_name>
-
-sc start <service_name>
+## 5. Quick Start
+```bash
+# 1. Stop server
+# 2. Backup server folder
+# 3. Copy FeedMeUpdates.cs → oxide/plugins
+# 4. Copy FeedMeUpdates.json → oxide/config
+# 5. Copy FeedMeUpdates(.exe) → server root
+# 6. Edit FeedMeUpdates.json (paths + options)
+# 7. Start server (first run will shut down, update, restart)
 ```
 
-If your service does not stop/start then you may try move your wrapper executable to a stable system path (_e.g. C:\\Tools\\nssm\\nssm.exe_) and update the binPath to the new wrapper path. This usually fix it.
+## 6. Installation (Detailed)
+1. Stop the server gracefully.
+2. Create a manual backup (delete later if installation succeeds).
+3. Place the plugin and executable.
+4. Configure the JSON file with proper absolute paths.
+5. Ensure script or service integration matches section 10.
+6. Start the server; the plugin triggers an immediate update cycle on first run.
 
-- Have your service autorestart on default but not on exit codes 0, 4294967295, 3221225786. You also need to be sure that stopping the service does not kill child processes and that standard windows failure procedures are disabled for your rust service (_note: your service will still restart on crash or unexpected exits, so you are safe to go_) On NSSM you do it by typing the following powershell commands as admin:
+## 7. Configuration
 
+### 7.1 Example `FeedMeUpdates.json`
+```json
+{
+  "ServerDirectory": "/home/rust/rust-server",
+  "SteamCmdPath": "/usr/games/steamcmd",
+  "UpdaterExecutablePath": "/home/rust/rust-server/FeedMeUpdates",
+  "ShowUpdaterConsole": false,
+  "ServerStartScript": "/home/rust/rust-server/start_server.sh",
+  "RunServerScriptHidden": true,
+  "ServerTmuxSession": "",
+  "RustOnService": false,
+  "ServiceName": "",
+  "StartupScan": true,
+  "MaxAttempts": 0,
+  "CheckIntervalMinutes": 10,
+  "CountdownMinutes": 5,
+  "UpdatePlugins": false,
+  "OnlyServerProtocolUpdate": false,
+  "UseScheme": false,
+  "SchemeFile": "",
+  "DailyRestartTime": "",
+  "MinutesBeforeRestart": 60,
+  "DiscordNotificationsEnabled": false,
+  "DiscordWebhookUrl": "",
+  "UpdaterMarkerFileName": "updateresult.json",
+  "UpdaterLockFileName": "updating.lock",
+  "MarkersSubfolder": "markers"
+}
 ```
+
+### 7.2 Parameter Reference
+| Key | Default | Description | Notes |
+|-----|---------|-------------|-------|
+| ServerDirectory | required | Root path where `RustDedicated` resides | Must exist |
+| SteamCmdPath | required | Full path to `steamcmd` | Needed for server updates |
+| UpdaterExecutablePath | required | Full path to updater executable | Invoked by plugin |
+| ShowUpdaterConsole | false | Try visible console window | Ignored if `RustOnService=true` |
+| ServerStartScript | (none) | Startup script path | Unused if using service |
+| RunServerScriptHidden | true | Hide startup script console | Linux may attempt GNOME terminal / tmux |
+| ServerTmuxSession | "" | tmux session name (Linux) | Only when visible launch |
+| RustOnService | false | Set true if server runs as a service | Requires exit code config |
+| ServiceName | "" | Service identifier | Required when `RustOnService=true` |
+| StartupScan | true | Immediate update check at plugin init | If false, only periodic checks |
+| MaxAttempts | 0 | Limit before disabling plugin | 0 = unlimited |
+| CheckIntervalMinutes | 10 | Poll frequency | Balance load vs freshness |
+| CountdownMinutes | 5 | In-game warning period | Chat messages |
+| UpdatePlugins | false | Enable plugin updates | uMod-listed only |
+| OnlyServerProtocolUpdate | false | Update only on major protocol change | Requires Oxide + server change |
+| UseScheme | false | Enable custom rule logic | Needs valid scheme file |
+| SchemeFile | "" | Path to scheme file | See section 9 |
+| DailyRestartTime | "" | HH:mm daily restart schedule | Empty disables feature |
+| MinutesBeforeRestart | 60 | Suspend checks before daily restart | Avoid race with planned restart |
+| DiscordNotificationsEnabled | false | Send start + result messages | Uses webhook |
+| DiscordWebhookUrl | "" | Webhook URL | Store securely if private |
+| UpdaterMarkerFileName | updateresult.json | Result marker file | Written by updater |
+| UpdaterLockFileName | updating.lock | Lock file for concurrency | Prevents overlapping runs |
+| MarkersSubfolder | markers | Folder for markers | Relative to server directory |
+
+## 8. Update Flow
+1. Detect update conditions (Rust / Oxide / plugins).
+2. Issue countdown warnings in chat.
+3. Stop server process.
+4. Create backup.
+5. Apply Rust update (SteamCMD).
+6. Apply Oxide update.
+7. Update plugins (optional).
+8. Write marker file + exit code.
+9. Restart server (script or service).
+10. Send Discord notification.
+
+## 9. Advanced: Scheme Rules
+Format per line:
+```
+events=action
+```
+Events combined with `+`:
+- `server` → server changed
+- `oxide(...)` → oxide changed with protocol flags:
+  - `s` same protocol
+  - `c` changed protocol
+  - `u` unknown protocol
+  - `e` error while fetching protocol
+- `oxide` (no parentheses) → any of e,s,c,u
+
+Actions: `server | oxide | both`
+
+Examples:
+```
+oxide(eucs)+server=both
+oxide(su)=oxide
+server=server
+```
+Processing is top-down; first match wins. Invalid lines disable `UseScheme` and revert to default logic.
+
+## 10. Service Integration
+
+### Windows (NSSM)
+Recommended commands:
+```powershell
+# Set restart behavior
 nssm set <service_name> AppExit Default Restart
-
 nssm set <service_name> AppExit 0 Exit
-
 nssm set <service_name> AppExit 4294967295 Exit
-
 nssm set <service_name> AppExit 3221225786 Exit
 
+# Configure stop method
 nssm set <service_name> AppStopMethodSkip 6
-
 nssm set <service_name> AppStopMethodConsole 60000
 
+# Disable Windows failure recovery
 sc.exe failureflag <service_name> 0
-
 reg delete "HKLM\\SYSTEM\\CurrentControlSet\\Services\\<service_name>" /v FailureActions /f
 ```
 
-For Linux users:
-
-Be sure to have these lines in your service ini:
-
+Verify service control:
+```powershell
+sc stop <service_name>
+sc start <service_name>
 ```
+
+If service control fails, move NSSM to a stable path (e.g., `C:\Tools\nssm\nssm.exe`) and update the service binPath.
+
+### Linux (systemd)
+Add these directives to your service unit file:
+```ini
 [Service]
 KillMode=process
 KillSignal=SIGINT
@@ -146,66 +229,82 @@ Restart=on-failure
 SuccessExitStatus=0 9 SIGKILL
 NoNewPrivileges=false
 ```
-You also need to add the start command to nopasswd so that updater can restart your service once update is over, here are the commands:
-```
-# change USERNAME value with the username of the user running the service and SERVICE value with your service name
+
+Grant passwordless sudo for service start:
+```bash
+# Replace USERNAME and SERVICE with your values
 USERNAME="user"
 SERVICE="rust-server.service"
 SYSTEMCTL_PATH="$(command -v systemctl)"
-# now we add a rule to skip sudo password just for start command
+
+# Add sudoers rule for start command only
 echo "${USERNAME} ALL=(root) NOPASSWD: ${SYSTEMCTL_PATH} start ${SERVICE}" | sudo tee /etc/sudoers.d/${SERVICE%.service}-start >/dev/null
 sudo chown root:root /etc/sudoers.d/${SERVICE%.service}-start
 sudo chmod 0440 /etc/sudoers.d/${SERVICE%.service}-start
 sudo visudo -c -f /etc/sudoers.d/${SERVICE%.service}-start
-# now we make sure your ini is properly configured with NoNewPrivileges set to false and then relead the service file
+
+# Ensure NoNewPrivileges is false
 sudo mkdir -p /etc/systemd/system/${SERVICE}.d
 printf "[Service]\nNoNewPrivileges=false\n" | sudo tee /etc/systemd/system/${SERVICE}.d/override.conf >/dev/null
 sudo systemctl daemon-reload
 ```
 
-**Note about updater execution**:
+## 11. Discord Notifications
+Set `DiscordNotificationsEnabled` to `true` and provide a valid webhook URL in `DiscordWebhookUrl`. The plugin sends:
+- **Start notification**: When update begins (includes countdown time).
+- **Result notification**: After update completes (success or failure details).
 
-- Both on Windows and on Linux if you set RustOnService true the updater will be ran in background, overriding the ShowUpdaterConsole value.
-- On Windows, the plugin runs the updater creating a new visible window if ShowUpdaterConsole is true, otherwise in background if false.
-- On Linux, if ShowUpdaterConsole is false the updater is run in background, if true the plugin tries to run it in the following ways (_in order of attempt; if both fail it runs in background_):
-  1) Opening a new shell window if GNOME-terminal is installed
-  2) Creating a new tmux session if tmux is installed (_session name: feedmeupdates_)
+Example webhook URL: `https://discord.com/api/webhooks/123456789/abcdef...`
 
-**Advanced "Scheme" (Custom Rules)**
+## 12. Error Handling & Debugging
+The updater writes logs and markers for troubleshooting:
+- **`updater.log`**: Located in server root, contains detailed execution logs.
+- **`updateresult.json`**: Marker file created after each update attempt, moved to `markers/` subfolder upon server restart.
 
-By enabling UseScheme and specifying a SchemeFile, you can define lines in the following format:
+Marker file fields:
+- `result`: `"success"` or `"failure"`
+- `fail_reason`: Error description (if applicable)
+- `update_id`: `"init"` (first run), `"testrun"` (manual test), or random 8-digit string
 
-- events = action
-  - events: one or more conditions separated by "+"
-  - server → "server changed" event
-  - oxide(...) → "oxide changed" event with protocol flags:
-    - s = same protocol
-    - c = changed protocol
-    - u = unknown protocol
-    - e = error while fetching protocol
-  - oxide without parentheses → considers all: e, s, c, u
-- action: server | oxide | both
+Check markers folder to review past update attempts.
 
-**Examples**:
+## 13. Security & Permissions
+- **File permissions**: Ensure the updater executable has execute permissions (`chmod +x` on Linux).
+- **Service permissions**: Grant only necessary permissions (e.g., passwordless `systemctl start` for the specific service, not all systemctl commands).
+- **Discord webhook**: Treat webhook URLs as secrets; restrict access to config files.
+- **SteamCMD**: Ensure SteamCMD directory is owned by the server user.
+- **Backup storage**: Verify sufficient disk space for backups before enabling updates.
 
-- oxide(eucs)+server=both (_If Oxide has changed (any case: e/s/c/u) AND the server has also changed, then update "both"_).
-- oxide(su)=oxide (_If Oxide has changed and the protocol is same/unknown (s or u), update only Oxide_).
-- server=server (_If only the server has changed, update only the server_).
+## 14. FAQ
 
-**Notes**:
+**Q: Can I run updates without shutting down the server?**  
+A: No, updates require server shutdown to replace files safely.
 
-- Blank lines or lines starting with "//" are ignored (_comments_).
-- If a line is invalid, the entire scheme is marked as "invalid" and UseScheme is disabled; the plugin prints errors and falls back to default logic.
+**Q: What happens if an update fails?**  
+A: The updater restores the backup automatically and writes failure details to the marker file.
 
-- Rule processing is sequential: the first matching rule determines the action.
+**Q: Can I skip plugin updates?**  
+A: Yes, set `UpdatePlugins` to `false`.
 
+**Q: How do I test the updater without affecting my live server?**  
+A: Use the `feedme.testrun` command in-game (admin only).
 
+**Q: Does FeedMeUpdates work with modded versions of Oxide?**  
+A: It works with standard Oxide distributions. Custom Oxide builds may require adjustments.
 
+**Q: Can I use this on a containerized server?**  
+A: Yes, but ensure the container has access to SteamCMD and proper file permissions.
 
+## 15. Contributing
+Contributions are welcome! Please follow this workflow:
+1. Open an issue describing the bug or feature request.
+2. Fork the repository and create a feature branch.
+3. Submit a pull request with a clear description of changes.
 
+Keep contributions focused and minimal. Test changes thoroughly before submission.
 
+## 16. License
+This project is licensed under the MIT License. See the [LICENSE](LICENSE) file for details.
 
-
-
-
-
+## 17. Keywords / Discoverability
+`rust-server` `rust-dedicated` `oxide` `umod` `automatic-updates` `steamcmd` `server-management` `discord-notifications` `backup-restore` `cross-platform` `windows` `linux` `systemd` `nssm` `game-server` `server-automation` `rust-updates` `oxide-updates` `plugin-manager` `server-updater`
