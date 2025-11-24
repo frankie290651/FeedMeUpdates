@@ -15,7 +15,7 @@ using Oxide.Core.Libraries.Covalence;
 
 namespace Oxide.Plugins
 {
-    [Info("FeedMeUpdates", "frankie290651", "1.2.6")]
+    [Info("FeedMeUpdates", "frankie290651", "1.2.7")]
     [Description("Highly configurable plugin for Oxide framework to orchestrate Server/Oxide/Plugins updates.")]
     public class FeedMeUpdates : CovalencePlugin
     {
@@ -111,6 +111,271 @@ namespace Oxide.Plugins
         private int targetMinute = 0;
 
         Scheme scheme = new Scheme();
+
+        #endregion
+
+        #region Resilient HTTP wrapper (Solution A)
+
+        // Backend detection and resilient HTTP helper:
+        private enum HttpBackend { Unknown, WebRequest, WebClient }
+        private HttpBackend currentHttpBackend = HttpBackend.Unknown;
+        private volatile bool httpBackendTested = false;
+        private readonly object httpBackendLock = new object();
+
+        // Try to detect available backend. Non-blocking: attempts webrequest first; if webrequest API throws immediately, switch to WebClient.
+        private void EnsureHttpBackendDetected()
+        {
+            if (httpBackendTested) return;
+            lock (httpBackendLock)
+            {
+                if (httpBackendTested) return;
+                httpBackendTested = true;
+                try
+                {
+                    var url = "https://api.github.com/";
+                    // Some Oxide versions expect Enqueue(url, postData, callback, owner) -> we pass null as postData for GET.
+                    try
+                    {
+                        webrequest.Enqueue(url, null, (code, response) =>
+                        {
+                            timer.Once(0f, () =>
+                            {
+                                currentHttpBackend = HttpBackend.WebRequest;
+                            });
+                        }, this);
+                        Task.Run(async () =>
+                        {
+                            await Task.Delay(1500).ConfigureAwait(false);
+                            if (currentHttpBackend == HttpBackend.Unknown)
+                            {
+                                currentHttpBackend = HttpBackend.WebRequest;
+                            }
+                        });
+                    }
+                    catch
+                    {
+                        currentHttpBackend = HttpBackend.WebClient;
+                    }
+                }
+                catch
+                {
+                    currentHttpBackend = HttpBackend.WebClient;
+                }
+            }
+        }
+
+        // Timeout default 3000 ms (3s). Returns (statusCode, body). -1 indicates failure/no response.
+        private (int statusCode, string body) ResilientHttpGetSync(string url, Dictionary<string, string> headers = null, int timeoutMs = 3000)
+        {
+            EnsureHttpBackendDetected();
+
+            try
+            {
+                var task = Task.Run(async () =>
+                {
+                    if (currentHttpBackend == HttpBackend.WebRequest)
+                    {
+                        try
+                        {
+                            return await HttpGetViaWebRequestAsync(url, headers).ConfigureAwait(false);
+                        }
+                        catch (Exception ex)
+                        {
+                            Puts("ResilientHttpGetSync: webrequest failed, switching to WebClient: " + ex.Message);
+                            currentHttpBackend = HttpBackend.WebClient;
+                            return await HttpGetViaWebClientAsync(url, headers).ConfigureAwait(false);
+                        }
+                    }
+                    else
+                    {
+                        return await HttpGetViaWebClientAsync(url, headers).ConfigureAwait(false);
+                    }
+                });
+
+                if (task.Wait(timeoutMs))
+                {
+                    return task.Result;
+                }
+                else
+                {
+                    return (-1, null);
+                }
+            }
+            catch (Exception ex)
+            {
+                Puts("ResilientHttpGetSync error: " + ex.Message);
+                return (-1, null);
+            }
+        }
+
+        private (int statusCode, string body) ResilientHttpPostSync(string url, Dictionary<string, string> headers, string payload, int timeoutMs = 3000)
+        {
+            EnsureHttpBackendDetected();
+
+            try
+            {
+                var task = Task.Run(async () =>
+                {
+                    if (currentHttpBackend == HttpBackend.WebRequest)
+                    {
+                        try
+                        {
+                            return await HttpPostViaWebRequestAsync(url, headers, payload).ConfigureAwait(false);
+                        }
+                        catch (Exception ex)
+                        {
+                            Puts("ResilientHttpPostSync: webrequest failed, switching to WebClient: " + ex.Message);
+                            currentHttpBackend = HttpBackend.WebClient;
+                            return await HttpPostViaWebClientAsync(url, headers, payload).ConfigureAwait(false);
+                        }
+                    }
+                    else
+                    {
+                        return await HttpPostViaWebClientAsync(url, headers, payload).ConfigureAwait(false);
+                    }
+                });
+
+                if (task.Wait(timeoutMs))
+                {
+                    return task.Result;
+                }
+                else
+                {
+                    return (-1, null);
+                }
+            }
+            catch (Exception ex)
+            {
+                Puts("ResilientHttpPostSync error: " + ex.Message);
+                return (-1, null);
+            }
+        }
+
+        private Task<(int statusCode, string body)> HttpGetViaWebRequestAsync(string url, Dictionary<string, string> headers = null)
+        {
+            var tcs = new TaskCompletionSource<(int, string)>();
+            try
+            {
+                // Enqueue overload expecting (url, postData, callback, owner) - pass null as postData for GET.
+                webrequest.Enqueue(url, null, (code, response) =>
+                {
+                    timer.Once(0f, () => tcs.TrySetResult((code, response)));
+                }, this);
+            }
+            catch (Exception ex)
+            {
+                tcs.TrySetException(ex);
+            }
+            return tcs.Task;
+        }
+
+        private Task<(int statusCode, string body)> HttpPostViaWebRequestAsync(string url, Dictionary<string, string> headers, string payload)
+        {
+            var tcs = new TaskCompletionSource<(int, string)>();
+            try
+            {
+                // Enqueue overload expecting (url, postData, callback, owner) - pass payload as postData for POST.
+                webrequest.Enqueue(url, payload ?? "", (code, response) =>
+                {
+                    timer.Once(0f, () => tcs.TrySetResult((code, response)));
+                }, this);
+            }
+            catch (Exception ex)
+            {
+                tcs.TrySetException(ex);
+            }
+            return tcs.Task;
+        }
+
+        private async Task<(int statusCode, string body)> HttpGetViaWebClientAsync(string url, Dictionary<string, string> headers = null)
+        {
+            try
+            {
+                using (var wc = new WebClient())
+                {
+                    if (headers != null)
+                    {
+                        foreach (var kv in headers)
+                        {
+                            try { wc.Headers[kv.Key] = kv.Value; } catch { }
+                        }
+                    }
+                    if (headers == null || !headers.ContainsKey("User-Agent"))
+                    {
+                        wc.Headers["User-Agent"] = "FeedMeUpdates/1.2.7";
+                    }
+
+                    var body = await wc.DownloadStringTaskAsync(url).ConfigureAwait(false);
+                    return (200, body);
+                }
+            }
+            catch (WebException wex)
+            {
+                int code = -1;
+                string body = null;
+                try
+                {
+                    if (wex.Response is HttpWebResponse resp)
+                    {
+                        code = (int)resp.StatusCode;
+                        using (var rs = resp.GetResponseStream())
+                        using (var sr = new StreamReader(rs))
+                            body = sr.ReadToEnd();
+                    }
+                }
+                catch { }
+                return (code, body);
+            }
+            catch (Exception ex)
+            {
+                return (-1, ex.Message);
+            }
+        }
+
+        private async Task<(int statusCode, string body)> HttpPostViaWebClientAsync(string url, Dictionary<string, string> headers, string payload)
+        {
+            try
+            {
+                using (var wc = new WebClient())
+                {
+                    if (headers != null)
+                    {
+                        foreach (var kv in headers)
+                        {
+                            try { wc.Headers[kv.Key] = kv.Value; } catch { }
+                        }
+                    }
+                    if (headers == null || !headers.ContainsKey(HttpRequestHeader.ContentType.ToString()))
+                        wc.Headers[HttpRequestHeader.ContentType] = "application/json";
+                    if (headers == null || !headers.ContainsKey("User-Agent"))
+                        wc.Headers["User-Agent"] = "FeedMeUpdates/1.2.7";
+
+                    var body = await wc.UploadStringTaskAsync(url, "POST", payload ?? "").ConfigureAwait(false);
+                    return (200, body);
+                }
+            }
+            catch (WebException wex)
+            {
+                int code = -1;
+                string body = null;
+                try
+                {
+                    if (wex.Response is HttpWebResponse resp)
+                    {
+                        code = (int)resp.StatusCode;
+                        using (var rs = resp.GetResponseStream())
+                        using (var sr = new StreamReader(rs))
+                            body = sr.ReadToEnd();
+                    }
+                }
+                catch { }
+                return (code, body);
+            }
+            catch (Exception ex)
+            {
+                return (-1, ex.Message);
+            }
+        }
 
         #endregion
 
@@ -363,19 +628,25 @@ namespace Oxide.Plugins
 
             try
             {
-                using (var client = new WebClient())
+                var payload = "{\"content\":\"" + EscapeJsonString(message) + "\"}";
+                var headers = new Dictionary<string, string>
                 {
-                    client.Headers.Add(HttpRequestHeader.ContentType, "application/json");
-                    client.Headers.Add("User-Agent", "FeedMeUpdates/1.2.5");
+                    { "Content-Type", "application/json" },
+                    { "User-Agent", "FeedMeUpdates/1.2.7" }
+                };
 
-                    string payload = "{\"content\":\"" + EscapeJsonString(message) + "\"}";
-
-                    await client.UploadStringTaskAsync(configData.DiscordWebhookUrl, "POST", payload).ConfigureAwait(false);
-                }
+                var result = await Task.Run(() => ResilientHttpPostSync(configData.DiscordWebhookUrl, headers, payload)).ConfigureAwait(false);
+                timer.Once(0f, () =>
+                {
+                    if (result.statusCode >= 200 && result.statusCode < 300)
+                        Puts("Discord notification sent successfully.");
+                    else
+                        Puts($"Error sending Discord notification: HTTP {result.statusCode} - {result.body}");
+                });
             }
             catch (Exception ex)
             {
-                Puts("Error sending Discord notification: " + ex.Message);
+                timer.Once(0f, () => Puts("Error sending Discord notification: " + ex.Message));
             }
         }
 
@@ -1297,15 +1568,13 @@ namespace Oxide.Plugins
             try
             {
                 var url = "https://api.github.com/repos/OxideMod/Oxide.Rust/releases/latest";
-                using (var client = new WebClient())
-                {
-                    client.Headers.Add("User-Agent", "FeedMeUpdates/1.2.5");
-                    var content = client.DownloadString(url);
-                    if (string.IsNullOrEmpty(content)) return null;
-                    var tagMatch = Regex.Match(content, "\"tag_name\"\\s*:\\s*\"v?([^\"]+)\"", RegexOptions.IgnoreCase);
-                    string tag = tagMatch.Success ? tagMatch.Groups[1].Value : null;
-                    return tag;
-                }
+                var headers = new Dictionary<string, string> { { "User-Agent", "FeedMeUpdates/1.2.7" } };
+                var res = ResilientHttpGetSync(url, headers);
+                if (res.statusCode != 200 || string.IsNullOrEmpty(res.body)) return null;
+                var content = res.body;
+                var tagMatch = Regex.Match(content, "\"tag_name\"\\s*:\\s*\"v?([^\"]+)\"", RegexOptions.IgnoreCase);
+                string tag = tagMatch.Success ? tagMatch.Groups[1].Value : null;
+                return tag;
             }
             catch (Exception ex)
             {
@@ -1381,54 +1650,61 @@ namespace Oxide.Plugins
 
             try
             {
-                using (var client = new WebClient())
+                var headers = new Dictionary<string, string> { { "User-Agent", "FeedMeUpdates/1.2.7" } };
+                var commitUrl = $"https://api.github.com/repos/OxideMod/Oxide.Rust/commits/{WebUtility.UrlEncode(oxideTag)}";
+                string commitJson = null;
+                try
                 {
-                    client.Headers.Add("User-Agent", "FeedMeUpdates/1.2.5");
-                    var commitUrl = $"https://api.github.com/repos/OxideMod/Oxide.Rust/commits/{WebUtility.UrlEncode(oxideTag)}";
-                    string commitJson = null;
-                    try { commitJson = client.DownloadString(commitUrl); }
-                    catch (WebException)
+                    var r = ResilientHttpGetSync(commitUrl, headers);
+                    if (r.statusCode == 200) commitJson = r.body;
+                    else
                     {
-                        try
+                        var relUrl = $"https://api.github.com/repos/OxideMod/Oxide.Rust/releases/tags/{WebUtility.UrlEncode(oxideTag)}";
+                        var relR = ResilientHttpGetSync(relUrl, headers);
+                        if (relR.statusCode == 200 && !string.IsNullOrEmpty(relR.body))
                         {
-                            var relUrl = $"https://api.github.com/repos/OxideMod/Oxide.Rust/releases/tags/{WebUtility.UrlEncode(oxideTag)}";
-                            var relJson = client.DownloadString(relUrl);
-                            var tc = Regex.Match(relJson, "\"target_commitish\"\\s*:\\s*\"([^\"]+)\"", RegexOptions.IgnoreCase);
+                            var tc = Regex.Match(relR.body, "\"target_commitish\"\\s*:\\s*\"([^\"]+)\"", RegexOptions.IgnoreCase);
                             var commitish = tc.Success ? tc.Groups[1].Value : null;
                             if (!string.IsNullOrEmpty(commitish))
                             {
                                 commitUrl = $"https://api.github.com/repos/OxideMod/Oxide.Rust/commits/{WebUtility.UrlEncode(commitish)}";
-                                commitJson = client.DownloadString(commitUrl);
+                                var commitR = ResilientHttpGetSync(commitUrl, headers);
+                                if (commitR.statusCode == 200) commitJson = commitR.body;
                             }
                         }
-                        catch (Exception ex2) { note = "commit/release lookup failed: " + ex2.Message; return null; }
                     }
-
-                    if (string.IsNullOrEmpty(commitJson)) { note = "no commit info"; return null; }
-
-                    var msgMatch = Regex.Match(commitJson, "\"message\"\\s*:\\s*\"([^\"]+)\"", RegexOptions.IgnoreCase);
-                    if (msgMatch.Success)
-                    {
-                        var msg = WebUtility.HtmlDecode(msgMatch.Groups[1].Value);
-                        var pm = Regex.Match(msg, @"protocol[^\d\n\r]{0,10}(\d+\.\d+\.\d+)", RegexOptions.IgnoreCase);
-                        if (pm.Success) oxideProto = pm.Groups[1].Value;
-                        else
-                        {
-                            var f = Regex.Match(msg, @"(\d+\.\d+\.\d+)");
-                            if (f.Success) oxideProto = f.Groups[1].Value;
-                        }
-                    }
-
-                    if (string.IsNullOrEmpty(oxideProto))
-                    {
-                        var anyProto = Regex.Match(commitJson, @"protocol[^\d\n\r]{0,10}(\d+\.\d+\.\d+)", RegexOptions.IgnoreCase);
-                        if (anyProto.Success) oxideProto = anyProto.Groups[1].Value;
-                    }
-
-                    if (string.IsNullOrEmpty(oxideProto)) { note = "oxide protocol not found"; return null; }
-                    if (oxideProto == localProto) { note = "protocols match"; return true; }
-                    note = "protocols differ"; return false;
                 }
+                catch (WebException)
+                {
+                    note = "commit/release lookup failed";
+                    return null;
+                }
+                catch (Exception ex2) { note = "commit/release lookup failed: " + ex2.Message; return null; }
+
+                if (string.IsNullOrEmpty(commitJson)) { note = "no commit info"; return null; }
+
+                var msgMatch = Regex.Match(commitJson, "\"message\"\\s*:\\s*\"([^\"]+)\"", RegexOptions.IgnoreCase);
+                if (msgMatch.Success)
+                {
+                    var msg = WebUtility.HtmlDecode(msgMatch.Groups[1].Value);
+                    var pm = Regex.Match(msg, @"protocol[^\d\n\r]{0,10}(\d+\.\d+\.\d+)", RegexOptions.IgnoreCase);
+                    if (pm.Success) oxideProto = pm.Groups[1].Value;
+                    else
+                    {
+                        var f = Regex.Match(msg, @"(\d+\.\d+\.\d+)");
+                        if (f.Success) oxideProto = f.Groups[1].Value;
+                    }
+                }
+
+                if (string.IsNullOrEmpty(oxideProto))
+                {
+                    var anyProto = Regex.Match(commitJson, @"protocol[^\d\n\r]{0,10}(\d+\.\d+\.\d+)", RegexOptions.IgnoreCase);
+                    if (anyProto.Success) oxideProto = anyProto.Groups[1].Value;
+                }
+
+                if (string.IsNullOrEmpty(oxideProto)) { note = "oxide protocol not found"; return null; }
+                if (oxideProto == localProto) { note = "protocols match"; return true; }
+                note = "protocols differ"; return false;
             }
             catch (Exception ex) { note = "exception: " + ex.Message; return null; }
         }
