@@ -38,7 +38,8 @@ FeedMeUpdates consists of:
 - Oxide plugin (`FeedMeUpdates.cs`) coordinating detection, countdown, and server restart logic.
 - Companion executable (`FeedMeUpdates.exe` / `FeedMeUpdates` on Linux) performing backup, update tasks (Rust / Oxide / plugins), and writing result markers.
 
-It minimizes downtime while providing flexible rules and safe rollback behavior.
+It minimizes downtime while providing flexible rules and safe rollback behavior. 
+Please note that Staging Branch is not supported yet.
 
 ## 2. Features
 - Automatic Rust server update (SteamCMD)
@@ -74,7 +75,6 @@ It minimizes downtime while providing flexible rules and safe rollback behavior.
 - SteamCMD accessible and functional
 - .NET 8 Runtime (only for non-standalone build)
 - Enough free disk space to store a full backup of the server folder
-NOTE: Staging Branch not supported at the moment
 
 ## 5. Quick Start
 ```bash
