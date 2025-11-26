@@ -1,6 +1,3 @@
-/* FeedMeUpdates 1.5.8
-   Changes: Added network failure tracking (lastNetworkFail/lastOxideStatusCode), configurable HttpTimeoutMs, unified User-Agent (FeedMeUpdates), extended feedme.status output only when called without args, restored webrequest smoke test + fallback WebClient. */
-
 using System;
 using System.Collections.Generic;
 using System.Globalization;
@@ -18,7 +15,7 @@ using Oxide.Core.Libraries.Covalence;
 
 namespace Oxide.Plugins
 {
-    [Info("FeedMeUpdates", "frankie290651", "1.5.8")]
+    [Info("FeedMeUpdates", "frankie290651", "1.5.9")]
     [Description("Highly configurable plugin for Oxide framework to orchestrate Server/Oxide/Plugins updates.")]
     public class FeedMeUpdates : CovalencePlugin
     {
@@ -564,14 +561,25 @@ namespace Oxide.Plugins
                     { "Content-Type", "application/json" }
                 };
 
-                var result = await Task.Run(() => ResilientHttpPostSync(configData.DiscordWebhookUrl, headers, payload, configData.HttpTimeoutMs)).ConfigureAwait(false);
-                timer.Once(0f, () =>
+                var prevBackend = currentHttpBackend;
+                currentHttpBackend = HttpBackend.WebClient;
+                try
                 {
-                    if (result.statusCode >= 200 && result.statusCode < 300)
-                        Puts("Discord notification sent successfully.");
-                    else
-                        Puts($"Error sending Discord notification: HTTP {result.statusCode} - {result.body}");
-                });
+                    var result = await Task.Run(() => ResilientHttpPostSync(configData.DiscordWebhookUrl, headers, payload, configData.HttpTimeoutMs)).ConfigureAwait(false);
+
+                    timer.Once(0f, () =>
+                    {
+                        if (result.statusCode >= 200 && result.statusCode < 300)
+                            Puts("Discord notification sent successfully.");
+                        else
+                            Puts($"Error sending Discord notification: HTTP {result.statusCode} - {result.body}");
+                    });
+                }
+                finally
+                {
+                    // restore previous backend
+                    currentHttpBackend = prevBackend;
+                }
             }
             catch (Exception ex)
             {
