@@ -1,3 +1,6 @@
+/* FeedMeUpdates 1.5.8
+   Changes: Added network failure tracking (lastNetworkFail/lastOxideStatusCode), configurable HttpTimeoutMs, unified User-Agent (FeedMeUpdates), extended feedme.status output only when called without args, restored webrequest smoke test + fallback WebClient. */
+
 using System;
 using System.Collections.Generic;
 using System.Globalization;
@@ -15,7 +18,7 @@ using Oxide.Core.Libraries.Covalence;
 
 namespace Oxide.Plugins
 {
-    [Info("FeedMeUpdates", "frankie290651", "1.2.7")]
+    [Info("FeedMeUpdates", "frankie290651", "1.5.8")]
     [Description("Highly configurable plugin for Oxide framework to orchestrate Server/Oxide/Plugins updates.")]
     public class FeedMeUpdates : CovalencePlugin
     {
@@ -36,7 +39,8 @@ namespace Oxide.Plugins
             public string ServiceName { get; set; } = "";
             public string ServiceType { get; set; } = "";
 
-            public bool StartupScan { get; set; } = true;
+            public int HttpTimeoutMs { get; set; } = 3000;
+            public bool StartupScan { get; set; } = false;
             public int MaxAttempts { get; set; } = 0;
             public int CheckIntervalMinutes { get; set; } = 10;
             public int CountdownMinutes { get; set; } = 5;
@@ -59,7 +63,6 @@ namespace Oxide.Plugins
 
         protected override void LoadDefaultConfig()
         {
-            // Initializes default configuration object.
             Config.WriteObject(new ConfigData(), true);
         }
 
@@ -112,17 +115,24 @@ namespace Oxide.Plugins
 
         Scheme scheme = new Scheme();
 
+        private bool lastNetworkFail = false;
+        private int lastOxideStatusCode = 0;
+
+        private const string UAValue = "FeedMeUpdates";
+
+        // Added: flag set by updater executable validation at init
+        private bool updaterValidAtInit = true;
+
         #endregion
 
         #region Resilient HTTP wrapper (Solution A)
 
-        // Backend detection and resilient HTTP helper:
         private enum HttpBackend { Unknown, WebRequest, WebClient }
         private HttpBackend currentHttpBackend = HttpBackend.Unknown;
         private volatile bool httpBackendTested = false;
         private readonly object httpBackendLock = new object();
 
-        // Try to detect available backend. Non-blocking: attempts webrequest first; if webrequest API throws immediately, switch to WebClient.
+        /* Smoke test to select backend */
         private void EnsureHttpBackendDetected()
         {
             if (httpBackendTested) return;
@@ -132,30 +142,19 @@ namespace Oxide.Plugins
                 httpBackendTested = true;
                 try
                 {
-                    var url = "https://api.github.com/";
-                    // Some Oxide versions expect Enqueue(url, postData, callback, owner) -> we pass null as postData for GET.
-                    try
+                    webrequest.Enqueue("https://api.github.com/", null, (code, response) =>
                     {
-                        webrequest.Enqueue(url, null, (code, response) =>
+                        timer.Once(0f, () =>
                         {
-                            timer.Once(0f, () =>
-                            {
-                                currentHttpBackend = HttpBackend.WebRequest;
-                            });
-                        }, this);
-                        Task.Run(async () =>
-                        {
-                            await Task.Delay(1500).ConfigureAwait(false);
-                            if (currentHttpBackend == HttpBackend.Unknown)
-                            {
-                                currentHttpBackend = HttpBackend.WebRequest;
-                            }
+                            currentHttpBackend = HttpBackend.WebRequest;
                         });
-                    }
-                    catch
+                    }, this);
+                    Task.Run(async () =>
                     {
-                        currentHttpBackend = HttpBackend.WebClient;
-                    }
+                        await Task.Delay(1500).ConfigureAwait(false);
+                        if (currentHttpBackend == HttpBackend.Unknown)
+                            currentHttpBackend = HttpBackend.WebRequest;
+                    });
                 }
                 catch
                 {
@@ -164,42 +163,29 @@ namespace Oxide.Plugins
             }
         }
 
-        // Timeout default 3000 ms (3s). Returns (statusCode, body). -1 indicates failure/no response.
-        private (int statusCode, string body) ResilientHttpGetSync(string url, Dictionary<string, string> headers = null, int timeoutMs = 3000)
+        /* Unified GET/POST with fallback and timeout */
+        private (int statusCode, string body) ResilientHttpGetSync(string url, Dictionary<string, string> headers = null, int timeoutMs = 0)
         {
             EnsureHttpBackendDetected();
-
+            int effectiveTimeout = timeoutMs > 0 ? timeoutMs : (configData?.HttpTimeoutMs > 0 ? configData.HttpTimeoutMs : 3000);
             try
             {
                 var task = Task.Run(async () =>
                 {
                     if (currentHttpBackend == HttpBackend.WebRequest)
                     {
-                        try
-                        {
-                            return await HttpGetViaWebRequestAsync(url, headers).ConfigureAwait(false);
-                        }
+                        try { return await HttpGetViaWebRequestAsync(url).ConfigureAwait(false); }
                         catch (Exception ex)
                         {
-                            Puts("ResilientHttpGetSync: webrequest failed, switching to WebClient: " + ex.Message);
+                            Puts("WebRequest GET failed, fallback WebClient: " + ex.Message);
                             currentHttpBackend = HttpBackend.WebClient;
                             return await HttpGetViaWebClientAsync(url, headers).ConfigureAwait(false);
                         }
                     }
-                    else
-                    {
-                        return await HttpGetViaWebClientAsync(url, headers).ConfigureAwait(false);
-                    }
+                    return await HttpGetViaWebClientAsync(url, headers).ConfigureAwait(false);
                 });
-
-                if (task.Wait(timeoutMs))
-                {
-                    return task.Result;
-                }
-                else
-                {
-                    return (-1, null);
-                }
+                if (task.Wait(effectiveTimeout)) return task.Result;
+                return (-1, null);
             }
             catch (Exception ex)
             {
@@ -208,41 +194,28 @@ namespace Oxide.Plugins
             }
         }
 
-        private (int statusCode, string body) ResilientHttpPostSync(string url, Dictionary<string, string> headers, string payload, int timeoutMs = 3000)
+        private (int statusCode, string body) ResilientHttpPostSync(string url, Dictionary<string, string> headers, string payload, int timeoutMs = 0)
         {
             EnsureHttpBackendDetected();
-
+            int effectiveTimeout = timeoutMs > 0 ? timeoutMs : (configData?.HttpTimeoutMs > 0 ? configData.HttpTimeoutMs : 3000);
             try
             {
                 var task = Task.Run(async () =>
                 {
                     if (currentHttpBackend == HttpBackend.WebRequest)
                     {
-                        try
-                        {
-                            return await HttpPostViaWebRequestAsync(url, headers, payload).ConfigureAwait(false);
-                        }
+                        try { return await HttpPostViaWebRequestAsync(url, payload).ConfigureAwait(false); }
                         catch (Exception ex)
                         {
-                            Puts("ResilientHttpPostSync: webrequest failed, switching to WebClient: " + ex.Message);
+                            Puts("WebRequest POST failed, fallback WebClient: " + ex.Message);
                             currentHttpBackend = HttpBackend.WebClient;
                             return await HttpPostViaWebClientAsync(url, headers, payload).ConfigureAwait(false);
                         }
                     }
-                    else
-                    {
-                        return await HttpPostViaWebClientAsync(url, headers, payload).ConfigureAwait(false);
-                    }
+                    return await HttpPostViaWebClientAsync(url, headers, payload).ConfigureAwait(false);
                 });
-
-                if (task.Wait(timeoutMs))
-                {
-                    return task.Result;
-                }
-                else
-                {
-                    return (-1, null);
-                }
+                if (task.Wait(effectiveTimeout)) return task.Result;
+                return (-1, null);
             }
             catch (Exception ex)
             {
@@ -251,12 +224,12 @@ namespace Oxide.Plugins
             }
         }
 
-        private Task<(int statusCode, string body)> HttpGetViaWebRequestAsync(string url, Dictionary<string, string> headers = null)
+        /* WebRequest GET async */
+        private Task<(int statusCode, string body)> HttpGetViaWebRequestAsync(string url)
         {
             var tcs = new TaskCompletionSource<(int, string)>();
             try
             {
-                // Enqueue overload expecting (url, postData, callback, owner) - pass null as postData for GET.
                 webrequest.Enqueue(url, null, (code, response) =>
                 {
                     timer.Once(0f, () => tcs.TrySetResult((code, response)));
@@ -269,12 +242,12 @@ namespace Oxide.Plugins
             return tcs.Task;
         }
 
-        private Task<(int statusCode, string body)> HttpPostViaWebRequestAsync(string url, Dictionary<string, string> headers, string payload)
+        /* WebRequest POST async */
+        private Task<(int statusCode, string body)> HttpPostViaWebRequestAsync(string url, string payload)
         {
             var tcs = new TaskCompletionSource<(int, string)>();
             try
             {
-                // Enqueue overload expecting (url, postData, callback, owner) - pass payload as postData for POST.
                 webrequest.Enqueue(url, payload ?? "", (code, response) =>
                 {
                     timer.Once(0f, () => tcs.TrySetResult((code, response)));
@@ -287,24 +260,22 @@ namespace Oxide.Plugins
             return tcs.Task;
         }
 
+        /* WebClient GET */
         private async Task<(int statusCode, string body)> HttpGetViaWebClientAsync(string url, Dictionary<string, string> headers = null)
         {
             try
             {
                 using (var wc = new WebClient())
                 {
+                    wc.Headers["User-Agent"] = UAValue;
                     if (headers != null)
                     {
                         foreach (var kv in headers)
                         {
+                            if (kv.Key.Equals("User-Agent", StringComparison.OrdinalIgnoreCase)) continue;
                             try { wc.Headers[kv.Key] = kv.Value; } catch { }
                         }
                     }
-                    if (headers == null || !headers.ContainsKey("User-Agent"))
-                    {
-                        wc.Headers["User-Agent"] = "FeedMeUpdates/1.2.7";
-                    }
-
                     var body = await wc.DownloadStringTaskAsync(url).ConfigureAwait(false);
                     return (200, body);
                 }
@@ -332,24 +303,24 @@ namespace Oxide.Plugins
             }
         }
 
+        /* WebClient POST */
         private async Task<(int statusCode, string body)> HttpPostViaWebClientAsync(string url, Dictionary<string, string> headers, string payload)
         {
             try
             {
                 using (var wc = new WebClient())
                 {
+                    wc.Headers["User-Agent"] = UAValue;
+                    wc.Headers[HttpRequestHeader.ContentType] = "application/json";
                     if (headers != null)
                     {
                         foreach (var kv in headers)
                         {
+                            if (kv.Key.Equals("User-Agent", StringComparison.OrdinalIgnoreCase)) continue;
+                            if (kv.Key.Equals("Content-Type", StringComparison.OrdinalIgnoreCase)) continue;
                             try { wc.Headers[kv.Key] = kv.Value; } catch { }
                         }
                     }
-                    if (headers == null || !headers.ContainsKey(HttpRequestHeader.ContentType.ToString()))
-                        wc.Headers[HttpRequestHeader.ContentType] = "application/json";
-                    if (headers == null || !headers.ContainsKey("User-Agent"))
-                        wc.Headers["User-Agent"] = "FeedMeUpdates/1.2.7";
-
                     var body = await wc.UploadStringTaskAsync(url, "POST", payload ?? "").ConfigureAwait(false);
                     return (200, body);
                 }
@@ -404,7 +375,6 @@ namespace Oxide.Plugins
             public List<schemeInstruction> instructions { get; set; } = null;
         }
 
-        // Parses a single scheme instruction line into structured data.
         public schemeInstruction ReadSchemeInstruction(int row, string rowContent)
         {
             var instr = new schemeInstruction();
@@ -497,38 +467,12 @@ namespace Oxide.Plugins
 
                             foreach (char c in flags)
                             {
-                                if (c == 'e')
-                                {
-                                    instr.OxideProtocolErrorEvent = true;
-                                    instr.OxideUpdateEvent = true;
-                                    oxideSet = true;
-                                }
-                                else if (c == 's')
-                                {
-                                    instr.OxideProtocolMatchEvent = true;
-                                    instr.OxideUpdateEvent = true;
-                                    oxideSet = true;
-                                }
-                                else if (c == 'c')
-                                {
-                                    instr.OxideProtocolMismatchEvent = true;
-                                    instr.OxideUpdateEvent = true;
-                                    oxideSet = true;
-                                }
-                                else if (c == 'u')
-                                {
-                                    instr.OxideProtocolUnknownEvent = true;
-                                    instr.OxideUpdateEvent = true;
-                                    oxideSet = true;
-                                }
-                                else if (char.IsWhiteSpace(c))
-                                {
-                                }
-                                else
-                                {
-                                    instr.ErrorText = $"Unknown oxide protocol event flag: '{c}'";
-                                    return instr;
-                                }
+                                if (c == 'e') { instr.OxideProtocolErrorEvent = true; instr.OxideUpdateEvent = true; oxideSet = true; }
+                                else if (c == 's') { instr.OxideProtocolMatchEvent = true; instr.OxideUpdateEvent = true; oxideSet = true; }
+                                else if (c == 'c') { instr.OxideProtocolMismatchEvent = true; instr.OxideUpdateEvent = true; oxideSet = true; }
+                                else if (c == 'u') { instr.OxideProtocolUnknownEvent = true; instr.OxideUpdateEvent = true; oxideSet = true; }
+                                else if (char.IsWhiteSpace(c)) { }
+                                else { instr.ErrorText = $"Unknown oxide protocol event flag: '{c}'"; return instr; }
                             }
                         }
                         continue;
@@ -539,13 +483,9 @@ namespace Oxide.Plugins
                 }
 
                 if ((instr.ServerEvent || instr.OxideUpdateEvent) && string.IsNullOrEmpty(instr.ErrorText))
-                {
                     instr.isValid = true;
-                }
                 else
-                {
                     instr.ErrorText = "No valid events parsed";
-                }
             }
             catch (Exception ex)
             {
@@ -555,7 +495,6 @@ namespace Oxide.Plugins
             return instr;
         }
 
-        // Reads and parses the entire scheme file into memory.
         public void ReadSchemeFile()
         {
             if (string.IsNullOrEmpty(configData.SchemeFile))
@@ -582,26 +521,17 @@ namespace Oxide.Plugins
                 if (string.IsNullOrEmpty(row) || row.StartsWith("//")) { x++; continue; }
 
                 schemeInstruction sIn = ReadSchemeInstruction(x, row);
-                if (!sIn.isValid)
-                {
-                    scheme.isValid = false;
-                }
+                if (!sIn.isValid) scheme.isValid = false;
                 scheme.instructions.Add(sIn);
                 x++;
             }
-            if (scheme.isValid)
-            {
-                Puts("Scheme correctly parsed. Now running on scheme behaviour.");
-            }
+            if (scheme.isValid) Puts("Scheme correctly parsed. Now running on scheme behaviour.");
             else
             {
                 Puts("Unable to parse scheme file. The following instructions are invalid:");
                 foreach (schemeInstruction si in scheme.instructions)
                 {
-                    if (!si.isValid)
-                    {
-                        Puts("(" + si.RowNum.ToString() + ") " + si.ErrorText);
-                    }
+                    if (!si.isValid) Puts("(" + si.RowNum.ToString() + ") " + si.ErrorText);
                 }
                 Puts("UseScheme has been disabled. Plugin is going back to default behaviour.");
                 configData.UseScheme = false;
@@ -631,11 +561,10 @@ namespace Oxide.Plugins
                 var payload = "{\"content\":\"" + EscapeJsonString(message) + "\"}";
                 var headers = new Dictionary<string, string>
                 {
-                    { "Content-Type", "application/json" },
-                    { "User-Agent", "FeedMeUpdates/1.2.7" }
+                    { "Content-Type", "application/json" }
                 };
 
-                var result = await Task.Run(() => ResilientHttpPostSync(configData.DiscordWebhookUrl, headers, payload)).ConfigureAwait(false);
+                var result = await Task.Run(() => ResilientHttpPostSync(configData.DiscordWebhookUrl, headers, payload, configData.HttpTimeoutMs)).ConfigureAwait(false);
                 timer.Once(0f, () =>
                 {
                     if (result.statusCode >= 200 && result.statusCode < 300)
@@ -650,8 +579,6 @@ namespace Oxide.Plugins
             }
         }
 
-        // Sends a Discord notification indicating update start.
-        // Use fire-and-forget to avoid making calling code async.
         private void NotifyDiscordUpdateStart(bool updateServer, bool updateOxide, string remoteOxideVersion, bool protocolChanged)
         {
             if (configData?.DiscordNotificationsEnabled != true) return;
@@ -664,12 +591,9 @@ namespace Oxide.Plugins
                 (string.IsNullOrEmpty(oxideMsg) ? "" : oxideMsg + "\n") +
                 (string.IsNullOrEmpty(protocolMsg) ? "" : protocolMsg);
 
-            // Fire-and-forget the async notification so we don't need to make callers async.
             _ = SendDiscordNotification(msg);
         }
 
-        // Sends a Discord notification indicating update result.
-        // Use fire-and-forget to avoid making calling code async.
         private void NotifyDiscordUpdateResult(string result, string updateId, bool pluginsUpdated, List<string> pluginsList, string failureReason)
         {
             if (configData?.DiscordNotificationsEnabled != true) return;
@@ -692,7 +616,6 @@ namespace Oxide.Plugins
                 }
             }
 
-            // Fire-and-forget the async notification so we don't block.
             _ = SendDiscordNotification(msg);
         }
 
@@ -700,7 +623,6 @@ namespace Oxide.Plugins
 
         #region Init / Unload
 
-        // Initializes plugin state and performs initial detection/setup.
         private void Init()
         {
             permission.RegisterPermission("feedme.run", this);
@@ -713,6 +635,7 @@ namespace Oxide.Plugins
             try
             {
                 configData = Config.ReadObject<ConfigData>() ?? new ConfigData();
+                if (configData.HttpTimeoutMs <= 0) configData.HttpTimeoutMs = 3000;
                 if (string.IsNullOrEmpty(configData.ServerStartScript) && !configData.RustOnService)
                 {
                     configData.ServerStartScript = RuntimeInformation.IsOSPlatform(OSPlatform.Windows) ? @"C:\rust-server\start_server.bat" : "/home/rust/rust-server/start_server.sh";
@@ -725,6 +648,27 @@ namespace Oxide.Plugins
                 configData = new ConfigData();
             }
 
+            // Added: validation of updater executable at init
+            try
+            {
+                string resolved, reason;
+                if (!ValidateUpdaterExecutableAtInit(out resolved, out reason))
+                {
+                    updaterValidAtInit = false;
+                    Puts("Updater executable validation failed at init: " + (reason ?? "unknown reason"));
+                }
+                else
+                {
+                    updaterValidAtInit = true;
+                    Puts("Updater executable validated at init: " + (resolved ?? "<unknown>"));
+                }
+            }
+            catch (Exception ex)
+            {
+                updaterValidAtInit = false;
+                Puts("Updater executable validation error at init: " + ex.Message);
+            }
+
             Puts($"FeedMeUpdates initialized (v{cachedPluginVersion}).");
 
             try { ProcessSteamTempAndDataFile(); } catch (Exception ex) { Puts("Error ProcessSteamTempAndDataFile: " + ex.Message); }
@@ -732,8 +676,8 @@ namespace Oxide.Plugins
             try { ProcessUpdaterMarkerIfPresent(); } catch (Exception ex) { Puts("Marker processing error: " + ex.Message); }
             try { ProcessUpdaterLockIfPresent(); } catch (Exception ex) { Puts("Lock processing error: " + ex.Message); }
 
-            if (configData.MaxAttempts != 0 && trynumber >= configData.MaxAttempts) { enablePlugin = false; }
-            else { enablePlugin = true; }
+            if (configData.MaxAttempts != 0 && trynumber >= configData.MaxAttempts) enablePlugin = false;
+            else enablePlugin = true;
 
             try
             {
@@ -790,7 +734,6 @@ namespace Oxide.Plugins
             }
         }
 
-        // Cleans up timers and runtime resources on unload.
         void Unload()
         {
             checkTimer?.Destroy();
@@ -803,7 +746,6 @@ namespace Oxide.Plugins
 
         #region steambid.temp + datafile
 
-        // Ensures trynumber is loaded or initialized in data file.
         private void ProcessTryNumber()
         {
             if (!ReadTryNumber())
@@ -813,10 +755,8 @@ namespace Oxide.Plugins
                     Puts("Unable to define try number in datafile.");
                 }
             }
-            return;
         }
 
-        // Reads attempt counter from data file if present.
         private bool ReadTryNumber()
         {
             try
@@ -836,7 +776,6 @@ namespace Oxide.Plugins
             return false;
         }
 
-        // Writes current attempt counter to data file.
         private bool WriteTryNumber()
         {
             try
@@ -853,7 +792,6 @@ namespace Oxide.Plugins
             return true;
         }
 
-        // Processes temporary steam build file and persists values.
         private void ProcessSteamTempAndDataFile()
         {
             if (string.IsNullOrEmpty(configData.ServerDirectory))
@@ -892,7 +830,6 @@ namespace Oxide.Plugins
             if (loaded) Puts($"LocalSteamBuildID loaded from datafile: {(string.IsNullOrEmpty(LocalSteamBuildID) ? "<empty>" : LocalSteamBuildID)}");
         }
 
-        // Loads local steam build ID from data file.
         private bool LoadLocalSteamFromDataFile()
         {
             try
@@ -909,7 +846,6 @@ namespace Oxide.Plugins
             return false;
         }
 
-        // Saves local steam build ID into data file.
         private void SaveLocalSteamToDataFile()
         {
             try
@@ -921,7 +857,6 @@ namespace Oxide.Plugins
             catch (Exception ex) { Puts("Error writing datafile (LocalSteamBuildID): " + ex.Message); }
         }
 
-        // Saves remote steam build ID into data file.
         private void SaveRemoteSteamToDataFile(string remoteBuild)
         {
             try
@@ -934,7 +869,6 @@ namespace Oxide.Plugins
             catch (Exception ex) { Puts("Error writing datafile (RemoteSteamBuildID): " + ex.Message); }
         }
 
-        // Removes remote steam build ID from data file.
         private void RemoveRemoteSteamFromDataFile()
         {
             try
@@ -948,10 +882,9 @@ namespace Oxide.Plugins
                     Puts("RemoteSteamBuildID removed from datafile.");
                 }
             }
-            catch (Exception ex) { Puts("Error removing RemoteSteamBuildID from datafile: " + ex.Message); }
+            catch (Exception ex) { Puts("Error removing RemoteSteamBuildID: " + ex.Message); }
         }
 
-        // Reads plugin data file into dictionary.
         private Dictionary<string, string> ReadDataFileDict()
         {
             try
@@ -962,7 +895,6 @@ namespace Oxide.Plugins
             catch (Exception ex) { Puts("Generic datafile read error: " + ex.Message); return new Dictionary<string, string>(); }
         }
 
-        // Writes dictionary into plugin data file.
         private void WriteDataFileDict(Dictionary<string, string> dict)
         {
             try { Interface.Oxide.DataFileSystem.WriteObject(DataFileName, dict); }
@@ -973,7 +905,6 @@ namespace Oxide.Plugins
 
         #region Marker & Lock
 
-        // Processes updater marker file and promotes remote build ID if success.
         private void ProcessUpdaterMarkerIfPresent()
         {
             try
@@ -1049,7 +980,6 @@ namespace Oxide.Plugins
             catch (Exception ex) { Puts("Error reading marker: " + ex.Message); }
         }
 
-        // Extracts a simple JSON string value from raw JSON content.
         private string ExtractJsonString(string json, string key)
         {
             if (string.IsNullOrEmpty(json) || string.IsNullOrEmpty(key)) return null;
@@ -1064,7 +994,6 @@ namespace Oxide.Plugins
             return null;
         }
 
-        // Processes lock file left by updater and removes it.
         private void ProcessUpdaterLockIfPresent()
         {
             try
@@ -1082,7 +1011,6 @@ namespace Oxide.Plugins
 
         #region Update detection (async)
 
-        // Applies scheme-based decision logic and returns update flags.
         private bool[] SchemeResult()
         {
             bool shithappens = false;
@@ -1254,7 +1182,6 @@ namespace Oxide.Plugins
             return new bool[3] { false, false, shithappens };
         }
 
-        // Applies default update logic to determine pending updates.
         private bool[] UpdateLogics()
         {
             bool shithappens = false;
@@ -1425,7 +1352,6 @@ namespace Oxide.Plugins
             }
         }
 
-        // Starts periodic scheduled update checks.
         private void StartPeriodicCheck()
         {
             if (!enablePlugin)
@@ -1438,7 +1364,6 @@ namespace Oxide.Plugins
             timer.Once(2f, () => StartUpdateDetectionAsync());
         }
 
-        // Executes asynchronous detection logic for updates.
         private void StartUpdateDetectionAsync()
         {
             if (isFetchingRemote)
@@ -1514,7 +1439,6 @@ namespace Oxide.Plugins
 
         #region Remote helpers
 
-        // Queries SteamCMD for remote Rust build ID.
         private string GetRemoteRustBuild()
         {
             try
@@ -1549,7 +1473,6 @@ namespace Oxide.Plugins
             }
         }
 
-        // Parses the build ID from SteamCMD output.
         private string ParseBuildId(string steamOutput)
         {
             if (string.IsNullOrEmpty(steamOutput)) return null;
@@ -1562,22 +1485,37 @@ namespace Oxide.Plugins
             return null;
         }
 
-        // Retrieves latest remote Oxide release version.
         private string GetRemoteOxideVersion()
         {
             try
             {
-                var url = "https://api.github.com/repos/OxideMod/Oxide.Rust/releases/latest";
-                var headers = new Dictionary<string, string> { { "User-Agent", "FeedMeUpdates/1.2.7" } };
-                var res = ResilientHttpGetSync(url, headers);
-                if (res.statusCode != 200 || string.IsNullOrEmpty(res.body)) return null;
-                var content = res.body;
-                var tagMatch = Regex.Match(content, "\"tag_name\"\\s*:\\s*\"v?([^\"]+)\"", RegexOptions.IgnoreCase);
+                int timeout = configData.HttpTimeoutMs > 0 ? configData.HttpTimeoutMs : 3000;
+                var res = ResilientHttpGetSync("https://api.github.com/repos/OxideMod/Oxide.Rust/releases/latest", null, timeout);
+                if (res.statusCode == -1)
+                {
+                    lastNetworkFail = true;
+                    lastOxideStatusCode = -1;
+                    Puts("[FeedMeUpdates] Oxide fetch timeout.");
+                    return null;
+                }
+                if (res.statusCode != 200 || string.IsNullOrEmpty(res.body))
+                {
+                    lastNetworkFail = true;
+                    lastOxideStatusCode = res.statusCode;
+                    Puts($"[FeedMeUpdates] Oxide fetch HTTP {res.statusCode}.");
+                    if (res.statusCode == 403) Puts("[FeedMeUpdates] Possible GitHub rate limit.");
+                    return null;
+                }
+                lastNetworkFail = false;
+                lastOxideStatusCode = res.statusCode;
+                var tagMatch = Regex.Match(res.body, "\"tag_name\"\\s*:\\s*\"v?([^\"]+)\"", RegexOptions.IgnoreCase);
                 string tag = tagMatch.Success ? tagMatch.Groups[1].Value : null;
                 return tag;
             }
             catch (Exception ex)
             {
+                lastNetworkFail = true;
+                lastOxideStatusCode = 0;
                 Puts("GetRemoteOxideVersion error: " + ex.Message);
                 throw;
             }
@@ -1587,7 +1525,6 @@ namespace Oxide.Plugins
 
         #region Local Oxide via FileVersionInfo
 
-        // Attempts to resolve installed Oxide version from DLL metadata.
         private string GetOxideVersionFromDll()
         {
             try
@@ -1621,7 +1558,6 @@ namespace Oxide.Plugins
             return "unknown";
         }
 
-        // Normalizes version string to a standard numeric form.
         private string NormalizeVersionString(string v)
         {
             if (string.IsNullOrEmpty(v)) return v;
@@ -1638,7 +1574,6 @@ namespace Oxide.Plugins
 
         #region Compatibility check
 
-        // Determines if a remote Oxide tag matches local protocol version.
         private bool? GetOxideCompatibilityInfo(string oxideTag, out string localProto, out string oxideProto, out string note)
         {
             localProto = localProtocol;
@@ -1650,36 +1585,28 @@ namespace Oxide.Plugins
 
             try
             {
-                var headers = new Dictionary<string, string> { { "User-Agent", "FeedMeUpdates/1.2.7" } };
-                var commitUrl = $"https://api.github.com/repos/OxideMod/Oxide.Rust/commits/{WebUtility.UrlEncode(oxideTag)}";
+                int timeout = configData.HttpTimeoutMs > 0 ? configData.HttpTimeoutMs : 3000;
+                string commitUrl = $"https://api.github.com/repos/OxideMod/Oxide.Rust/commits/{WebUtility.UrlEncode(oxideTag)}";
+                var r = ResilientHttpGetSync(commitUrl, null, timeout);
                 string commitJson = null;
-                try
+
+                if (r.statusCode == 200) commitJson = r.body;
+                else
                 {
-                    var r = ResilientHttpGetSync(commitUrl, headers);
-                    if (r.statusCode == 200) commitJson = r.body;
-                    else
+                    var relUrl = $"https://api.github.com/repos/OxideMod/Oxide.Rust/releases/tags/{WebUtility.UrlEncode(oxideTag)}";
+                    var relR = ResilientHttpGetSync(relUrl, null, timeout);
+                    if (relR.statusCode == 200 && !string.IsNullOrEmpty(relR.body))
                     {
-                        var relUrl = $"https://api.github.com/repos/OxideMod/Oxide.Rust/releases/tags/{WebUtility.UrlEncode(oxideTag)}";
-                        var relR = ResilientHttpGetSync(relUrl, headers);
-                        if (relR.statusCode == 200 && !string.IsNullOrEmpty(relR.body))
+                        var tc = Regex.Match(relR.body, "\"target_commitish\"\\s*:\\s*\"([^\"]+)\"", RegexOptions.IgnoreCase);
+                        var commitish = tc.Success ? tc.Groups[1].Value : null;
+                        if (!string.IsNullOrEmpty(commitish))
                         {
-                            var tc = Regex.Match(relR.body, "\"target_commitish\"\\s*:\\s*\"([^\"]+)\"", RegexOptions.IgnoreCase);
-                            var commitish = tc.Success ? tc.Groups[1].Value : null;
-                            if (!string.IsNullOrEmpty(commitish))
-                            {
-                                commitUrl = $"https://api.github.com/repos/OxideMod/Oxide.Rust/commits/{WebUtility.UrlEncode(commitish)}";
-                                var commitR = ResilientHttpGetSync(commitUrl, headers);
-                                if (commitR.statusCode == 200) commitJson = commitR.body;
-                            }
+                            commitUrl = $"https://api.github.com/repos/OxideMod/Oxide.Rust/commits/{WebUtility.UrlEncode(commitish)}";
+                            var commitR = ResilientHttpGetSync(commitUrl, null, timeout);
+                            if (commitR.statusCode == 200) commitJson = commitR.body;
                         }
                     }
                 }
-                catch (WebException)
-                {
-                    note = "commit/release lookup failed";
-                    return null;
-                }
-                catch (Exception ex2) { note = "commit/release lookup failed: " + ex2.Message; return null; }
 
                 if (string.IsNullOrEmpty(commitJson)) { note = "no commit info"; return null; }
 
@@ -1709,24 +1636,10 @@ namespace Oxide.Plugins
             catch (Exception ex) { note = "exception: " + ex.Message; return null; }
         }
 
-        // Logs compatibility of Oxide release with local Rust protocol.
-        private bool IsOxideReleaseCompatibleWithLocalRust(string oxideTag)
-        {
-            try
-            {
-                string lp, op, note;
-                var res = GetOxideCompatibilityInfo(oxideTag, out lp, out op, out note);
-                Puts($"Compatibility: local={lp ?? "n/a"} oxide={op ?? "n/a"} note={note ?? "none"} result={(res==true?"COMPATIBLE":(res==false?"INCOMPATIBLE":"UNKNOWN"))}");
-                return res == true;
-            }
-            catch (Exception ex) { Puts("Compatibility error: " + ex.Message); return false; }
-        }
-
         #endregion
 
         #region Countdown & Updater invocation
 
-        // Starts a countdown before invoking updater and restarting server.
         private void BeginUpdateCountdown(string remoteBuild, string remoteOxide)
         {
             if (countdownActive)
@@ -1759,7 +1672,7 @@ namespace Oxide.Plugins
                     StartUpdaterExecutable(updateServer: pendingServerUpdate, updateOxide: pendingOxideUpdate, remoteBuildArg: remoteBuildArg, remoteOxideArg: remoteOxideArg);
 
                     Puts("Countdown end: scheduling graceful save+quit...");
-                    PerformSaveAndQuitGracefully(saveAlreadyDone: true);
+                    PerformSaveAndQuitGracefully();
 
                     countdownActive = false;
                     return;
@@ -1777,14 +1690,20 @@ namespace Oxide.Plugins
 
         #region StartUpdaterExecutable
 
-        // Launches the external updater process with configured arguments.
         private void StartUpdaterExecutable(bool updateServer, bool updateOxide, string overrideUpdateId = null, string overrideWhat = null, string remoteBuildArg = null, string remoteOxideArg = null)
         {
             try
             {
+                if (!updaterValidAtInit)
+                {
+                    Puts("Cannot launch updater: updater executable failed validation at init.");
+                    BroadcastToAdmins("Updater launch aborted: invalid updater executable detected at init.");
+                    return;
+                }
+
                 string updateId = !string.IsNullOrEmpty(overrideUpdateId) ? overrideUpdateId : new System.Random().Next(0, 100000000).ToString("D8");
                 string what = !string.IsNullOrEmpty(overrideWhat) ? overrideWhat : (updateServer && updateOxide ? "both" : (updateServer ? "server" : (updateOxide ? "oxide" : "none")));
-                string updatePluginsArg = configData.UpdatePlugins ? "yes" : "no";
+                //string updatePluginsArg = configData.UpdatePlugins ? "yes" : "no";
 
                 var exePath = configData.UpdaterExecutablePath;
 
@@ -1818,10 +1737,17 @@ namespace Oxide.Plugins
 
                 string remoteBuildArgEsc = (!string.IsNullOrEmpty(overrideUpdateId) && overrideUpdateId == "init") ? "no" : (updateServer ? (remoteBuildArg ?? "") : "no");
                 string remoteOxideArgEsc = (!string.IsNullOrEmpty(overrideUpdateId) && overrideUpdateId == "init") ? "no" : (updateOxide ? (remoteOxideArg ?? "") : "no");
-                string tempIsService = configData.RustOnService ? "1" : "0";
-                string showserverconsole = configData.RunServerScriptHidden ? "0" : "1";
 
-                string args = $"-update_id \"{updateId}\" -what \"{what}\" -update_plugins \"{updatePluginsArg}\" -server_dir \"{configData.ServerDirectory}\" -steamcmd \"{configData.SteamCmdPath}\" -start_script \"{configData.ServerStartScript}\" -remote_build \"{remoteBuildArgEsc}\" -remote_oxide \"{remoteOxideArgEsc}\" -isService \"{tempIsService}\" -serviceType \"{configData.ServiceType}\" -serviceName \"{configData.ServiceName}\" -showserverconsole \"{showserverconsole}\" -servertmux \"{configData.ServerTmuxSession}\"";
+                string args;
+                {
+                    string argFailReason;
+                    if (!ValidateAndBuildArgsForStart(updateId, what, remoteBuildArgEsc, remoteOxideArgEsc, out args, out argFailReason))
+                    {
+                        Puts("Argument validation failed: " + argFailReason);
+                        BroadcastToAdmins("Updater launch aborted: invalid arguments.");
+                        return;
+                    }
+                }
 
                 Puts($"Preparing to launch updater: {exePath} {args} (ShowUpdaterConsole={configData.ShowUpdaterConsole})");
 
@@ -1923,7 +1849,6 @@ namespace Oxide.Plugins
 
         #region Commands
 
-        // Command: shows or toggles periodic check status.
         private void Cmd_Status(IPlayer player, string command, string[] args)
         {
             if (!HasPermissionOrConsole(player)) return;
@@ -1954,11 +1879,12 @@ namespace Oxide.Plugins
             }
 
             var status = checkTimer == null ? "OFF" : "ON";
-            player?.Message($"FeedMeUpdates status: {status}. pendingServerUpdate={pendingServerUpdate} pendingOxideUpdate={pendingOxideUpdate} LocalSteamBuildID={(string.IsNullOrEmpty(LocalSteamBuildID) ? "<empty>" : LocalSteamBuildID)}");
-            Puts($"Status requested. {status}. pendingServerUpdate={pendingServerUpdate} pendingOxideUpdate={pendingOxideUpdate}");
+            string extra = $"backend={currentHttpBackend} httpTimeoutMs={(configData?.HttpTimeoutMs ?? 0)} lastOxideStatus={lastOxideStatusCode} netFail={(lastNetworkFail ? "YES" : "NO")} scheme={(configData.UseScheme ? "ON" : "OFF")}";
+            string buildLocal = string.IsNullOrEmpty(LocalSteamBuildID) ? "<empty>" : LocalSteamBuildID;
+            player?.Message($"FeedMeUpdates status: {status}. pendingServerUpdate={pendingServerUpdate} pendingOxideUpdate={pendingOxideUpdate} LocalSteamBuildID={buildLocal} {extra}");
+            Puts($"Status requested. {status}. pendingServerUpdate={pendingServerUpdate} pendingOxideUpdate={pendingOxideUpdate} {extra}");
         }
 
-        // Command: shows plugin and environment version details.
         private void Cmd_Version(IPlayer player, string command, string[] args)
         {
             if (!HasPermissionOrConsole(player)) return;
@@ -1974,7 +1900,6 @@ namespace Oxide.Plugins
             Puts(outMsg);
         }
 
-        // Command: forces immediate test update and shutdown.
         private void Cmd_TestRun(IPlayer player, string command, string[] args)
         {
             if (!HasPermissionOrConsole(player)) return;
@@ -2001,7 +1926,7 @@ namespace Oxide.Plugins
                 StartUpdaterExecutable(updateServer: true, updateOxide: true, overrideUpdateId: "testrun", overrideWhat: "both", remoteBuildArg: remoteBuildArg, remoteOxideArg: remoteOxideArg);
 
                 Puts("Testrun: scheduling graceful save+quit...");
-                PerformSaveAndQuitGracefully(saveAlreadyDone: false);
+                PerformSaveAndQuitGracefully();
             });
         }
 
@@ -2009,7 +1934,6 @@ namespace Oxide.Plugins
 
         #region Utilities
 
-        // Validates the configured daily restart time format.
         public bool ValidateRestartTime()
         {
             if (string.IsNullOrWhiteSpace(configData.DailyRestartTime) || !TryParseHourMinute(configData.DailyRestartTime, out targetHour, out targetMinute))
@@ -2021,7 +1945,6 @@ namespace Oxide.Plugins
             return true;
         }
 
-        // Disables periodic checks near scheduled daily restart time.
         private void DailyRestartCheckerMethod()
         {
             DateTime now = DateTime.Now;
@@ -2043,7 +1966,6 @@ namespace Oxide.Plugins
             }
         }
 
-        // Parses an HH:mm time string into hour and minute.
         private bool TryParseHourMinute(string input, out int hour, out int minute)
         {
             hour = 0;
@@ -2069,7 +1991,6 @@ namespace Oxide.Plugins
             return false;
         }
 
-        // Checks whether a tmux session exists.
         public static bool TmuxSessionExists(string sessionName, int timeoutMs = 2000)
         {
             if (string.IsNullOrWhiteSpace(sessionName)) return false;
@@ -2105,7 +2026,6 @@ namespace Oxide.Plugins
             }
         }
 
-        // Detects availability of GNOME terminal and tmux on Linux.
         private bool[] DetectGnomeAndTmux()
         {
             if (!RuntimeInformation.IsOSPlatform(OSPlatform.Linux))
@@ -2142,7 +2062,6 @@ namespace Oxide.Plugins
             return new bool[] { gnome, tmux };
         }
 
-        // Checks permissions for a player or console.
         private bool HasPermissionOrConsole(IPlayer player)
         {
             if (player == null) return true;
@@ -2153,7 +2072,6 @@ namespace Oxide.Plugins
             return false;
         }
 
-        // Broadcasts a message to all connected players.
         private void BroadcastToPlayers(string message)
         {
             try
@@ -2164,7 +2082,6 @@ namespace Oxide.Plugins
             catch (Exception ex) { Puts("Broadcast error: " + ex.Message); }
         }
 
-        // Broadcasts a message only to admins or privileged users.
         private void BroadcastToAdmins(string message)
         {
             try
@@ -2178,39 +2095,23 @@ namespace Oxide.Plugins
             catch (Exception ex) { Puts("BroadcastToAdmins error: " + ex.Message); }
         }
 
-        // Performs a graceful save and call the quit sequence.
-        private void PerformSaveAndQuitGracefully(bool saveAlreadyDone = false, float delayBeforeQuitAfterSave = 2f)
+        // Server shutdown sequence: write configuration then quit after 500 ms.
+        private void PerformSaveAndQuitGracefully()
         {
             try
             {
-                if (!saveAlreadyDone)
-                {
-                    RunSequence(
-                        (0f, () =>
-                        {
-                            Puts("FeedMeUpdates: server.writecfg...");
-                            ConsoleSystem.Run(ConsoleSystem.Option.Server, "server.writecfg");
-                        }
-                    ),
-                        (0.5f, () =>
-                        {
-                            Puts("FeedMeUpdates: server.save...");
-                            ConsoleSystem.Run(ConsoleSystem.Option.Server, "server.save");
-                        }
-                    ),
-                        (delayBeforeQuitAfterSave, () =>
-                        {
-                            TryQuitThenShutdownFallback();
-                        }
-                    )
-                    );
-                }
-                else
-                {
-                    RunSequence(
-                        (delayBeforeQuitAfterSave, () => TryQuitThenShutdownFallback())
-                    );
-                }
+                RunSequence(
+                    (0f, () =>
+                    {
+                        Puts("FeedMeUpdates: server.writecfg...");
+                        ConsoleSystem.Run(ConsoleSystem.Option.Server, "server.writecfg");
+                    }),
+                    (0.5f, () =>
+                    {
+                        Puts("FeedMeUpdates: quit...");
+                        ConsoleSystem.Run(ConsoleSystem.Option.Server, "quit");
+                    })
+                );
             }
             catch (Exception ex)
             {
@@ -2218,7 +2119,6 @@ namespace Oxide.Plugins
             }
         }
 
-        // Helper non-blocking sequence runner used by PerformSaveAndQuitGracefully
         private void RunSequence(params (float delay, Action action)[] steps)
         {
             void RunStep(int i)
@@ -2234,38 +2134,10 @@ namespace Oxide.Plugins
             RunStep(0);
         }
 
-        // Performs quit and shutdown as fallback
-        private void TryQuitThenShutdownFallback()
-        {
-            try
-            {
-                Puts("FeedMeUpdates: issuing quit...");
-                ConsoleSystem.Run(ConsoleSystem.Option.Server, "quit");
-            }
-            catch (Exception ex)
-            {
-                Puts("FeedMeUpdates: quit command error: " + ex.Message);
-            }
-
-            timer.Once(1f, () =>
-            {
-                try
-                {
-                    Puts("FeedMeUpdates: issuing server.shutdown (fallback)...");
-                    ConsoleSystem.Run(ConsoleSystem.Option.Server, "server.shutdown");
-                }
-                catch (Exception ex)
-                {
-                    Puts("FeedMeUpdates: server.shutdown error: " + ex.Message);
-                }
-            });
-        }
-
         #endregion
 
         #region Hooks
 
-        // Hook: runs after server initialization to trigger startup logic.
         void OnServerInitialized()
         {
             if (string.IsNullOrEmpty(LocalSteamBuildID))
@@ -2273,7 +2145,7 @@ namespace Oxide.Plugins
                 Puts("OnServerInitialized: LocalSteamBuildID is empty -> starting updater immediately (init flow).");
                 StartUpdaterExecutable(updateServer: true, updateOxide: true, overrideUpdateId: "init", overrideWhat: "both", remoteBuildArg: "no", remoteOxideArg: "no");
                 Puts("OnServerInitialized: scheduled save+quit after updater start (init).");
-                PerformSaveAndQuitGracefully(saveAlreadyDone: false);
+                PerformSaveAndQuitGracefully();
                 return;
             }
 
@@ -2329,20 +2201,215 @@ namespace Oxide.Plugins
                     StartUpdaterExecutable(updateServer: updateServer, updateOxide: updateOxide, overrideUpdateId: null, overrideWhat: what, remoteBuildArg: remoteBuildArg, remoteOxideArg: remoteOxideArg);
 
                     Puts("StartupScan: scheduling graceful save+quit after updater start.");
-                    PerformSaveAndQuitGracefully(saveAlreadyDone: false);
+                    PerformSaveAndQuitGracefully();
                     return;
                 }
                 else
                 {
-                    Puts("StartupScan: no updates available at startup.");
+                    if (lastNetworkFail)
+                        Puts("StartupScan: remote Oxide fetch failed; skipping update for safety.");
+                    else
+                        Puts("StartupScan: no updates available at startup.");
                 }
             }
 
             if (checkTimer == null) StartPeriodicCheck();
         }
 
-        // Hook: server save handled explicitly elsewhere.
         void OnServerSave() { }
+
+        #endregion
+
+        #region Validation helpers (added)
+
+        // Validates updater executable at init (existence, not directory, size>0; on Linux resolves symlink and checks +x)
+        private bool ValidateUpdaterExecutableAtInit(out string resolvedPath, out string reason)
+        {
+            resolvedPath = null;
+            reason = null;
+            try
+            {
+                var exePath = configData?.UpdaterExecutablePath ?? "";
+                if (string.IsNullOrWhiteSpace(exePath))
+                {
+                    reason = "UpdaterExecutablePath is empty.";
+                    return false;
+                }
+
+                if (!Path.IsPathRooted(exePath) && !string.IsNullOrEmpty(configData?.ServerDirectory))
+                {
+                    var candidate = Path.Combine(configData.ServerDirectory, exePath);
+                    if (File.Exists(candidate)) exePath = candidate;
+                }
+
+                try { exePath = Path.GetFullPath(exePath); } catch { }
+
+                if (!File.Exists(exePath))
+                {
+                    reason = "Updater executable not found: " + exePath;
+                    return false;
+                }
+
+                var attr = File.GetAttributes(exePath);
+                if ((attr & FileAttributes.Directory) != 0)
+                {
+                    reason = "Updater path is a directory: " + exePath;
+                    return false;
+                }
+
+                var fi = new FileInfo(exePath);
+                if (fi.Length == 0)
+                {
+                    reason = "Updater file has zero length: " + exePath;
+                    return false;
+                }
+
+                if (RuntimeInformation.IsOSPlatform(OSPlatform.Linux))
+                {
+                    string target = TryResolveSymlinkUnix(exePath) ?? exePath;
+                    if (!IsExecutableUnix(target))
+                    {
+                        reason = "Updater is not executable (+x missing): " + target;
+                        return false;
+                    }
+                    if (!string.Equals(target, exePath, StringComparison.Ordinal))
+                        Puts("Init: updater is a symlink -> resolved target: " + target);
+                    resolvedPath = target;
+                    return true;
+                }
+
+                resolvedPath = exePath;
+                return true;
+            }
+            catch (Exception ex)
+            {
+                reason = "Exception during updater validation: " + ex.Message;
+                return false;
+            }
+        }
+
+        // Builds and validates a platform-safe arguments string for updater execution
+        private bool ValidateAndBuildArgsForStart(string updateId, string what, string remoteBuildArgValue, string remoteOxideArgValue, out string argsForProcess, out string failReason)
+        {
+            argsForProcess = null;
+            failReason = null;
+            try
+            {
+                var argMap = new Dictionary<string, string>(StringComparer.Ordinal)
+                {
+                    { "-update_id", updateId ?? "" },
+                    { "-what", what ?? "" },
+                    { "-update_plugins", configData.UpdatePlugins ? "yes" : "no" },
+                    { "-server_dir", configData.ServerDirectory ?? "" },
+                    { "-steamcmd", configData.SteamCmdPath ?? "" },
+                    { "-start_script", configData.ServerStartScript ?? "" },
+                    { "-remote_build", string.IsNullOrEmpty(remoteBuildArgValue) ? "" : remoteBuildArgValue },
+                    { "-remote_oxide", string.IsNullOrEmpty(remoteOxideArgValue) ? "" : remoteOxideArgValue },
+                    { "-isService", configData.RustOnService ? "1" : "0" },
+                    { "-serviceType", configData.ServiceType ?? "" },
+                    { "-serviceName", configData.ServiceName ?? "" },
+                    { "-showserverconsole", configData.RunServerScriptHidden ? "0" : "1" },
+                    { "-servertmux", configData.ServerTmuxSession ?? "" }
+                };
+
+                foreach (var kv in argMap)
+                {
+                    if (!IsSafeArgValue(kv.Value))
+                    {
+                        failReason = $"Unsafe value for {kv.Key}";
+                        return false;
+                    }
+                }
+
+                if (RuntimeInformation.IsOSPlatform(OSPlatform.Windows))
+                {
+                    var parts = argMap.Select(kv => $"{kv.Key} \"{kv.Value ?? ""}\"");
+                    argsForProcess = string.Join(" ", parts);
+                    return true;
+                }
+                else
+                {
+                    var parts = argMap.Select(kv => $"{kv.Key} {QuoteForShell(kv.Value ?? "")}");
+                    argsForProcess = string.Join(" ", parts);
+                    return true;
+                }
+            }
+            catch (Exception ex)
+            {
+                failReason = "Args build exception: " + ex.Message;
+                return false;
+            }
+        }
+
+        // Returns true if argument value is free of control/metacharacters and matches whitelist
+        private bool IsSafeArgValue(string v)
+        {
+            if (v == null) return true;
+            if (v.IndexOfAny(new char[] { '\0', '\r', '\n' }) >= 0) return false;
+            if (v.IndexOfAny(new char[] { '"', '\'', '`', ';', '|', '&', '$', '<', '>', '(', ')', '{', '}', '[', ']', '*', '?', '~', '%' }) >= 0) return false;
+            return Regex.IsMatch(v, @"^[A-Za-z0-9 _\.\-\/:\@\+\=,\\]*$");
+        }
+
+        // Returns true if file is executable on Unix (test -x)
+        private bool IsExecutableUnix(string path)
+        {
+            try
+            {
+                var psi = new ProcessStartInfo
+                {
+                    FileName = "/bin/sh",
+                    Arguments = "-c " + QuoteForShell($"test -x \"{path.Replace("\"", "\\\"")}\""),
+                    UseShellExecute = false,
+                    RedirectStandardOutput = false,
+                    RedirectStandardError = false,
+                    CreateNoWindow = true
+                };
+                using (var p = Process.Start(psi))
+                {
+                    if (p == null) return false;
+                    if (!p.WaitForExit(1000))
+                    {
+                        try { p.Kill(); } catch { }
+                        return false;
+                    }
+                    return p.ExitCode == 0;
+                }
+            }
+            catch { return false; }
+        }
+
+        // Resolves symlink target using readlink -f (best effort)
+        private string TryResolveSymlinkUnix(string path)
+        {
+            try
+            {
+                var psi = new ProcessStartInfo
+                {
+                    FileName = "/bin/sh",
+                    Arguments = "-c " + QuoteForShell($"readlink -f \"{path.Replace("\"", "\\\"")}\""),
+                    UseShellExecute = false,
+                    RedirectStandardOutput = true,
+                    RedirectStandardError = false,
+                    CreateNoWindow = true
+                };
+                using (var p = Process.Start(psi))
+                {
+                    if (p == null) return null;
+                    var outp = p.StandardOutput.ReadToEnd();
+                    if (!p.WaitForExit(1000)) { try { p.Kill(); } catch { } }
+                    outp = outp?.Trim();
+                    if (string.IsNullOrEmpty(outp)) return null;
+                    return outp;
+                }
+            }
+            catch { return null; }
+        }
+
+        // Quotes a string for shell single-quoted context
+        private string QuoteForShell(string s)
+        {
+            return "'" + (s ?? "").Replace("'", "'\\''") + "'";
+        }
 
         #endregion
     }
