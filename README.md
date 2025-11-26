@@ -74,6 +74,7 @@ It minimizes downtime while providing flexible rules and safe rollback behavior.
 - SteamCMD accessible and functional
 - .NET 8 Runtime (only for non-standalone build)
 - Enough free disk space to store a full backup of the server folder
+NOTE: Staging Branch not supported at the moment
 
 ## 5. Quick Start
 ```bash
@@ -108,6 +109,7 @@ It minimizes downtime while providing flexible rules and safe rollback behavior.
   "ServerTmuxSession": "",
   "RustOnService": false,
   "ServiceName": "",
+  "HttpTimeoutMs": 3000,
   "StartupScan": true,
   "MaxAttempts": 0,
   "CheckIntervalMinutes": 10,
@@ -138,6 +140,7 @@ It minimizes downtime while providing flexible rules and safe rollback behavior.
 | ServerTmuxSession | "" | tmux session name (Linux) | Only when visible launch |
 | RustOnService | false | Set true if server runs as a service | Requires exit code config |
 | ServiceName | "" | Service identifier | Required when `RustOnService=true` |
+| HttpTimeoutMs | 3000 | Time limit for web requests | Increase it only if you notice frequent timouts reported |
 | StartupScan | true | Immediate update check at plugin init | If false, only periodic checks |
 | MaxAttempts | 0 | Limit before disabling plugin | 0 = unlimited |
 | CheckIntervalMinutes | 10 | Poll frequency | Balance load vs freshness |
