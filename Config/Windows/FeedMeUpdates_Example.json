@@ -9,6 +9,7 @@
   "RustOnService": false,
   "ServiceName": "",
   "ServiceType": "",
+  "HttpTimeoutMs": 3000,
   "StartupScan": true,
   "MaxAttempts": 0,
   "CheckIntervalMinutes": 10,
