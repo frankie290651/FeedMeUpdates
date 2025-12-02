@@ -243,8 +243,8 @@ Plus many resiliency improvements:
   - NextWipeDeletePluginDatafiles: JSON array (as string) of plugin .json/.data files to delete from `oxide/data` at wipe.
 
 - Markers and locks
-  - UpdaterMarkerFileName: FMU app writes updater result here.
-  - UpdaterLockFileName: Prevent re‑entry; FMU plugin clears it on startup if found.
+  - UpdaterMarkerFileName: FMU app writes updater result here. (leave this as it is!)
+  - UpdaterLockFileName: Prevent re‑entry; FMU plugin clears it on startup if found. (leave this as it is!)
   - MarkersSubfolder: Folder where plugin archives markers on next boot.
 
 Notes:
@@ -329,6 +329,7 @@ All actions are logged to `updater.log`. If anything fails during promotion, the
 FMU can start your server either via:
 - Script (Windows `.bat`/PowerShell or Linux shell script)
 - Service (Windows SC/NSSM or Linux systemd)
+Please note that service support is only available for service running directly RustDedicated (if your service controls a script that controls RustDedicated it won't work).
 
 Below are ready‑to‑use command sets for both platforms.
 
@@ -353,7 +354,7 @@ nssm set <service_name> AppStopMethodSkip 6
 nssm set <service_name> AppStopMethodConsole 60000
 ```
 
-3) Disable Windows service failure recovery (let FMU control restarts):
+3) Disable Windows service failure recovery interference with FMU and NSSM:
 ```powershell
 sc.exe failureflag <service_name> 0
 reg delete "HKLM\SYSTEM\CurrentControlSet\Services\<service_name>" /v FailureActions /f
@@ -366,7 +367,7 @@ mkdir C:\Tools\nssm
 copy .\nssm.exe C:\Tools\nssm\nssm.exe
 
 # Repoint your service (if needed)
-nssm set <service_name> AppPath "C:\path\to\your\start_server.bat"
+nssm set <service_name> AppPath "C:\path\to\your\RustDedicated.exe"
 ```
 
 5) In FMU config:
