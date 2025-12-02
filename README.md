@@ -24,7 +24,7 @@
 9. Update Flow  
 10. Wipe Automation (Force + Custom)  
 11. Self‑Update (FMU plugin + app)  
-12. Service / Script Integration  
+12. Service / Script Integration (with commands)  
 13. Discord Notifications  
 14. Commands & Permissions  
 15. Error Handling, Markers & Logs  
@@ -103,7 +103,7 @@ Plus many resiliency improvements:
   ├── Creates backup (temp_backup/)
   ├── Applies Rust and/or Oxide updates
   ├── Updates plugins (optional)
-  ├── Executes WipeCycle if requested (force/custom)
+  ├── Executes the WipeCycle (force/custom) when requested
   ├── Writes updateresult.json + updater.log
   └── Restarts server (script/service)
 ```
@@ -324,31 +324,99 @@ All actions are logged to `updater.log`. If anything fails during promotion, the
 
 ---
 
-## 12. Service / Script Integration
+## 12. Service / Script Integration (with commands)
 
 FMU can start your server either via:
 - Script (Windows `.bat`/PowerShell or Linux shell script)
 - Service (Windows SC/NSSM or Linux systemd)
 
-Recommendations:
+Below are ready‑to‑use command sets for both platforms.
 
-- Windows (NSSM)
-  - Ensure service start/stop works via `sc stop <name>` / `sc start <name>`.
-  - Configure NSSM to not aggressively restart on non‑zero exit codes while FMU is handling updates.
+### Windows (NSSM‑managed service)
 
-- Linux (systemd)
-  - Recommended service settings:
-    ```
-    [Service]
-    KillMode=process
-    KillSignal=SIGINT
-    SendSIGKILL=no
-    Restart=on-failure
-    SuccessExitStatus=0 9 SIGKILL
-    NoNewPrivileges=false
-    ```
-  - If running FMU as a non‑root user, configure sudoers to allow `systemctl start <service>` without a password for that user.
-  - On Linux, if `ShowUpdaterConsole=true`, FMU attempts gnome‑terminal or tmux. Otherwise, it falls back to nohup.
+1) Ensure your service can be started/stopped via SC:
+```powershell
+sc stop <service_name>
+sc start <service_name>
+```
+
+2) Recommended NSSM configuration (prevents unwanted restarts while FMU is handling updates and ensures clean stops):
+```powershell
+# Restart behavior: restart on unexpected codes, exit on success/kill
+nssm set <service_name> AppExit Default Restart
+nssm set <service_name> AppExit 0 Exit
+nssm set <service_name> AppExit 4294967295 Exit
+nssm set <service_name> AppExit 3221225786 Exit
+
+# Stop method: allow console signal time
+nssm set <service_name> AppStopMethodSkip 6
+nssm set <service_name> AppStopMethodConsole 60000
+```
+
+3) Disable Windows service failure recovery (let FMU control restarts):
+```powershell
+sc.exe failureflag <service_name> 0
+reg delete "HKLM\SYSTEM\CurrentControlSet\Services\<service_name>" /v FailureActions /f
+```
+
+4) If service control is unreliable, place NSSM in a stable path and update the service:
+```powershell
+# Example: move NSSM to a fixed location
+mkdir C:\Tools\nssm
+copy .\nssm.exe C:\Tools\nssm\nssm.exe
+
+# Repoint your service (if needed)
+nssm set <service_name> AppPath "C:\path\to\your\start_server.bat"
+```
+
+5) In FMU config:
+- Set `"RustOnService": true`
+- Set `"ServiceName": "<service_name>"`
+- Typically set `"RunServerScriptHidden": true` and leave `"ServerStartScript"` empty
+
+FMU will stop the server (you stop it first) and start it again through the service once updates/wipes are complete.
+
+### Linux (systemd)
+
+1) Service unit recommendations (add to your service file):
+```ini
+[Service]
+KillMode=process
+KillSignal=SIGINT
+SendSIGKILL=no
+Restart=on-failure
+SuccessExitStatus=0 9 SIGKILL
+NoNewPrivileges=false
+```
+
+2) Allow FMU’s user to (re)start the specific service without a password (sudoers NOPASSWD). Replace USERNAME and SERVICE below:
+```bash
+USERNAME="rust"                            # your linux user running FMU/Rust
+SERVICE="rust-server.service"              # your systemd unit
+
+SYSTEMCTL_PATH="$(command -v systemctl)"
+
+# Allow passwordless start for this service only
+echo "${USERNAME} ALL=(root) NOPASSWD: ${SYSTEMCTL_PATH} start ${SERVICE}" | sudo tee /etc/sudoers.d/${SERVICE%.service}-start >/dev/null
+sudo chown root:root /etc/sudoers.d/${SERVICE%.service}-start
+sudo chmod 0440 /etc/sudoers.d/${SERVICE%.service}-start
+sudo visudo -c -f /etc/sudoers.d/${SERVICE%.service}-start
+```
+
+3) Ensure NoNewPrivileges is false (or overridden) if your main unit enforces it:
+```bash
+sudo mkdir -p /etc/systemd/system/${SERVICE}.d
+printf "[Service]\nNoNewPrivileges=false\n" | sudo tee /etc/systemd/system/${SERVICE}.d/override.conf >/dev/null
+sudo systemctl daemon-reload
+```
+
+4) In FMU config:
+- Set `"RustOnService": true`
+- Set `"ServiceName": "rust-server.service"`
+- Optionally keep `"RunServerScriptHidden": true` (not used for services)
+- Ensure the FMU user can run `sudo -n systemctl start rust-server.service`
+
+FMU waits for the service to stop before updating, then starts it again via `systemctl start`.
 
 ---
 
