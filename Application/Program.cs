@@ -1,10 +1,12 @@
 using System;
 using System.Collections.Generic;
 using System.Diagnostics;
+using System.Globalization;
 using System.IO;
 using System.IO.Compression;
 using System.Linq;
 using System.Net.Http;
+using System.Numerics;
 using System.Runtime.InteropServices;
 using System.Text;
 using System.Text.Json;
@@ -13,13 +15,15 @@ using System.Threading;
 
 namespace FeedMeUpdates
 {
+    #region Logger and RunState
+
     internal static class Logger
     {
         private static StreamWriter? writer;
         private static readonly object sync = new();
-        private const long MaxSizeBytes = 5L * 1024L * 1024L; // 5 MB
+        private const long MaxSizeBytes = 5L * 1024L * 1024L;
 
-        /// <summary>Initializes the logger creating/rotating the log file in the server directory.</summary>
+        // Initialize logger and rotate log file if needed.
         public static void Init(string serverDir)
         {
             lock (sync)
@@ -61,14 +65,14 @@ namespace FeedMeUpdates
             }
         }
 
-        /// <summary>Returns a timestamp string for log entries.</summary>
+        // Return timestamp for log entries.
         private static string Timestamp()
         {
             var now = DateTime.Now;
             return $"[{now:dd/MM/yy HH:mm:ss}]";
         }
 
-        /// <summary>Writes a log line to console and file with a given level.</summary>
+        // Write a line to console and log file with level tag.
         private static void Write(string level, string message)
         {
             var line = $"{Timestamp()} [{level}] {message}";
@@ -79,14 +83,12 @@ namespace FeedMeUpdates
             }
         }
 
-        /// <summary>Logs an informational message.</summary>
+        // Convenience log level methods.
         public static void Info(string msg) => Write("INFO", msg);
-        /// <summary>Logs a warning message.</summary>
         public static void Warn(string msg) => Write("WARN", msg);
-        /// <summary>Logs an error message.</summary>
         public static void Error(string msg) => Write("ERROR", msg);
 
-        /// <summary>Closes the logger and releases resources.</summary>
+        // Close and release logger resources.
         public static void Close()
         {
             lock (sync)
@@ -113,16 +115,35 @@ namespace FeedMeUpdates
         public static string ServiceName = "";
         public static bool ShowServerConsole = false;
         public static string ServerTmux = "";
+
+        public static bool IsForce = false;
+        public static string NextWipeLevel = "";
+        public static string NextWipeUrl = "";
+        public static string NextWipeSeed = "";
+        public static string NextWipeMapsize = "";
+        public static bool NextWipeKeepBps = false;
+        public static bool NextWipeDeletePlayerData = false;
+        public static string NextWipeDelPluginsData = "";
+        public static List<string> PdataFilesToDelete = new List<string>();
+        public static string ServerIdentity = "";
+        public static string ServerName = "";
+        public static string ServerDescription = "";
     }
+
+    #endregion
+
+    #region Program main and argument parsing
 
     internal static class Program
     {
+        private static string FMU_VERSION = "";
+        private static bool isStandalone = false;
         private static string Fails = "";
         private static readonly List<DateTime> __PluginRequestTimestamps = new();
 
-        private enum FlowKind { Init, Testrun, Scheduled }
+        private enum FlowKind { Init, Testrun, Scheduled, Wipe }
 
-        /// <summary>Entry point: parses arguments and routes to the appropriate update flow.</summary>
+        // Parse arguments and dispatch flow.
         static int Main(string[] args)
         {
             if (args == null || args.Length == 0)
@@ -182,6 +203,18 @@ namespace FeedMeUpdates
             parsed.TryGetValue("showserverconsole", out var showserverconsoleVal);
             parsed.TryGetValue("servertmux", out var servertmuxVal);
 
+            parsed.TryGetValue("isforce", out var isForceVal);
+            parsed.TryGetValue("nextwipelevel", out var nextWipeLevelVal);
+            parsed.TryGetValue("nextwipeurl", out var nextWipeUrlVal);
+            parsed.TryGetValue("nextwipeseed", out var nextWipeSeedVal);
+            parsed.TryGetValue("nextwipemapsize", out var nextWipeMapsizeVal);
+            parsed.TryGetValue("nextwipekeepbps", out var nextWipeKeepBpsVal);
+            parsed.TryGetValue("nextwipedelplayerdata", out var nextWipeDelPlayerDataVal);
+            parsed.TryGetValue("nextwipedelpluginsdata", out var nextWipeDelPluginsDataVal);
+            parsed.TryGetValue("serveridentity", out var serverIdentityVal);
+            parsed.TryGetValue("servername", out var serverNameVal);
+            parsed.TryGetValue("serverdescription", out var serverDescriptionVal);
+
             RunState.UpdateId = updateId;
             RunState.What = whatVal ?? "";
             RunState.UpdatePluginsFlag = updatePluginsVal ?? "";
@@ -197,6 +230,18 @@ namespace FeedMeUpdates
             RunState.ShowServerConsole = ParseBool(showserverconsoleVal);
             RunState.ServerTmux = servertmuxVal ?? "";
 
+            RunState.IsForce = ParseBool(isForceVal);
+            RunState.NextWipeLevel = nextWipeLevelVal ?? "";
+            RunState.NextWipeUrl = RevertFromb64(nextWipeUrlVal) ?? "";
+            RunState.NextWipeSeed = nextWipeSeedVal ?? "";
+            RunState.NextWipeMapsize = nextWipeMapsizeVal ?? "";
+            RunState.NextWipeKeepBps = ParseBool(nextWipeKeepBpsVal);
+            RunState.NextWipeDeletePlayerData = ParseBool(nextWipeDelPlayerDataVal);
+            RunState.NextWipeDelPluginsData = nextWipeDelPluginsDataVal ?? "";
+            RunState.ServerIdentity = serverIdentityVal ?? "";
+            RunState.ServerName = RevertFromb64(serverNameVal) ?? "";
+            RunState.ServerDescription = RevertFromb64(serverDescriptionVal) ?? "";
+
             if (RunState.IsService && RunState.ShowServerConsole)
                 RunState.ShowServerConsole = false;
 
@@ -206,6 +251,10 @@ namespace FeedMeUpdates
             {
                 if (string.IsNullOrEmpty(RunState.What)) RunState.What = "both";
                 return HandleFlow(FlowKind.Testrun);
+            }
+            if (string.Equals(updateId, "wipe", StringComparison.OrdinalIgnoreCase))
+            {
+                return HandleFlow(FlowKind.Wipe);
             }
             if (Regex.IsMatch(updateId, @"^\d{8}$"))
             {
@@ -218,11 +267,34 @@ namespace FeedMeUpdates
             return 0;
         }
 
-        /// <summary>Coordinates a selected flow (init, test run, scheduled) including backup, update and restart.</summary>
+        // Decode optional base64-encoded argument values.
+        private static string RevertFromb64(string? argValue)
+        {
+            if (argValue == null)
+                return "";
+            var original = argValue;
+            if (argValue.StartsWith("b64:"))
+            {
+                var b64 = argValue.Substring(4);
+                var rawBytes = Convert.FromBase64String(b64);
+                original = Encoding.UTF8.GetString(rawBytes);
+            }
+            return original;
+        }
+
+    #endregion
+
+    #region Flow handler and validation
+
+        // Coordinate the selected flow including backup, update and restart.
         private static int HandleFlow(FlowKind kind)
         {
             Logger.Init(RunState.ServerDir);
             Logger.Info($"{kind.ToString().ToUpper()} flow started. Args: update_id={RunState.UpdateId} what={RunState.What} update_plugins={RunState.UpdatePluginsFlag} server_dir={RunState.ServerDir} steamcmd={RunState.SteamCmd} start_script={RunState.StartScript} isService={RunState.IsService} serviceName={RunState.ServiceName}");
+            var updatingLockPath = Path.Combine(RunState.ServerDir, "updating.lock");
+
+            string wipeResult = "no";
+            string wipeingErrors = "";
 
             if (!ValidateFlow(kind))
             {
@@ -234,7 +306,6 @@ namespace FeedMeUpdates
 
             WaitForRustDedicatedAndLog();
 
-            var updatingLockPath = Path.Combine(RunState.ServerDir, "updating.lock");
             if (File.Exists(updatingLockPath))
             {
                 Logger.Warn($"updating.lock file present in {RunState.ServerDir}");
@@ -246,6 +317,74 @@ namespace FeedMeUpdates
             else
             {
                 File.Create(updatingLockPath).Dispose();
+            }
+
+            if (kind == FlowKind.Wipe)
+            {
+                try
+                {
+                    Logger.Info("CUSTOM WIPE request detected.");
+                    if (RunState.NextWipeDelPluginsData != "")
+                    {
+                        RunState.PdataFilesToDelete = DecodeFileListArgToList(RunState.NextWipeDelPluginsData);
+                        if (RunState.PdataFilesToDelete.Count == 0)
+                        {
+                            Logger.Warn("Plugins datafile argument interpretation failed. No plugin data will be deleted.");
+                        }
+                    }
+                    Logger.Info("Invoking WipeCycle.");
+                    wipeResult = WipeCycle(out wipeingErrors);
+                    Logger.Info("CUSTOM WIPE: WipeCycle completed.");
+                }
+                catch (Exception ex)
+                {
+                    Logger.Error($"CUSTOM WIPE: WipeCycle error: {ex.Message}");
+                    CreateUpdateresultAndStartScript(RunState.ServerDir, RunState.UpdateId, ex.Message, RunState.StartScript);
+                    Logger.Close();
+                    return 0;
+                }
+                try
+                {
+                    var marker = new Dictionary<string, object?>();
+                    marker["result"] = "success";
+                    marker["fail_reason"] = null;
+                    marker["timestamp"] = DateTime.UtcNow.ToString("o");
+                    marker["update_id"] = "wipe";
+                    marker["wiped"] = wipeResult;
+                    marker["wipe_info"] = wipeingErrors;
+
+                    var markerPath = Path.Combine(RunState.ServerDir, "updateresult.json");
+                    var json = JsonSerializer.Serialize(marker, new JsonSerializerOptions { WriteIndented = true });
+                    File.WriteAllText(markerPath, json);
+                    Logger.Info($"{kind.ToString().ToUpper()}: Wrote success marker to {markerPath}");
+                }
+                catch (Exception ex)
+                {
+                    Logger.Error($"{kind.ToString().ToUpper()}: Error writing success marker: {ex.Message}");
+                }
+                try
+                {
+                    if (!RunState.IsService)
+                    {
+                        Logger.Info($"{kind.ToString().ToUpper()}: Starting start_script: {RunState.StartScript}");
+                        StartServerScript(RunState.StartScript, RunState.ServerDir);
+                        Logger.Info($"{kind.ToString().ToUpper()}: start_script launched.");
+                    }
+                    else
+                    {
+                        Logger.Info($"{kind.ToString().ToUpper()}: Starting service: {RunState.ServiceName}");
+                        RestartRustService(RunState.ServiceName);
+                        Logger.Info($"{kind.ToString().ToUpper()}: service start invoked.");
+                    }
+                }
+                catch (Exception ex)
+                {
+                    Logger.Error($"{kind.ToString().ToUpper()}: Failed to start {(RunState.IsService ? "service" : "start_script")}: {ex.Message}");
+                }
+
+                Logger.Info($"{kind.ToString().ToUpper()}: Flow complete. Exiting.");
+                Logger.Close();
+                return 0;
             }
 
             if (!CreateTempBackup(RunState.ServerDir, RunState.UpdateId, out var backupPath))
@@ -356,6 +495,32 @@ namespace FeedMeUpdates
                 Logger.Info($"{kind.ToString().ToUpper()}: update_plugins flag is 'no' -> skipping plugin updates.");
             }
 
+            if (kind == FlowKind.Scheduled && RunState.IsForce)
+            {
+                try
+                {
+                    Logger.Info("FORCE WIPE detected.");
+                    if (RunState.NextWipeDelPluginsData != "")
+                    {
+                        RunState.PdataFilesToDelete = DecodeFileListArgToList(RunState.NextWipeDelPluginsData);
+                        if (RunState.PdataFilesToDelete.Count == 0)
+                        {
+                            Logger.Warn("Plugins datafile argument interpretation failed. No plugin data will be deleted.");
+                        }
+                    }
+                    Logger.Info("Invoking WipeCycle.");
+                    wipeResult = WipeCycle(out wipeingErrors);
+                    Logger.Info("SCHEDULED: WipeCycle completed.");
+                }
+                catch (Exception ex)
+                {
+                    Logger.Error($"SCHEDULED: WipeCycle error: {ex.Message}");
+                    Logger.Warn("SCHEDULED: IMPORTANT! SERVER IS UPDATED BUT MUST BE WIPED MANUALLY.");
+                    Logger.Close();
+                    return 0;
+                }
+            }
+
             try
             {
                 var marker = new Dictionary<string, object?>();
@@ -369,6 +534,8 @@ namespace FeedMeUpdates
                 marker["update_id"] = kind == FlowKind.Init ? "init"
                                   : kind == FlowKind.Testrun ? "testrun"
                                   : RunState.UpdateId;
+                marker["wiped"] = wipeResult;
+                marker["wipe_info"] = wipeingErrors;
 
                 var markerPath = Path.Combine(RunState.ServerDir, "updateresult.json");
                 var json = JsonSerializer.Serialize(marker, new JsonSerializerOptions { WriteIndented = true });
@@ -407,10 +574,108 @@ namespace FeedMeUpdates
             return 0;
         }
 
-        /// <summary>Validates arguments and environment for the selected flow.</summary>
+        // Validate arguments and environment for the selected flow.
         private static bool ValidateFlow(FlowKind kind)
         {
-            if (kind == FlowKind.Init || kind == FlowKind.Testrun)
+            if(kind == FlowKind.Wipe)
+            {
+                if(string.IsNullOrEmpty(RunState.ServerDir))
+                {
+                    Logger.Error($"{kind.ToString().ToUpper()} validation failed: server dir not specified");
+                    CreateUpdateresultAndStartScript(RunState.ServerDir, RunState.UpdateId, "Wipe validation failed: server dir not specified", RunState.StartScript);
+                    return false;
+                }
+                else
+                {
+                    if(!Directory.Exists(RunState.ServerDir))
+                    {
+                        Logger.Error($"{kind.ToString().ToUpper()} validation failed: server directory doesn't exist");
+                        CreateUpdateresultAndStartScript(RunState.ServerDir, RunState.UpdateId, "Wipe validation failed: server directory doesn't exist", RunState.StartScript);
+                        return false;
+                    }
+                }
+                if (string.IsNullOrEmpty(RunState.ServerIdentity))
+                    RunState.ServerIdentity = "my_server_identity";
+
+                if (RuntimeInformation.IsOSPlatform(OSPlatform.Windows))
+                {
+                    if (!string.IsNullOrEmpty(RunState.NextWipeDelPluginsData))
+                    {
+                        if (!Directory.Exists(RunState.ServerDir + "\\oxide\\data"))
+                        {
+                            Logger.Error($"{kind.ToString().ToUpper()} validation failed: plugin data directory doesn't exist");
+                            CreateUpdateresultAndStartScript(RunState.ServerDir, RunState.UpdateId, "Wipe validation failed: plugin data directory doesn't exist", RunState.StartScript);
+                            return false;
+                        }
+                    }
+                    if(!Directory.Exists(RunState.ServerDir + "\\server\\" + RunState.ServerIdentity))
+                    {
+                        Logger.Error($"{kind.ToString().ToUpper()} validation failed: server identity directory doesn't exist");
+                        CreateUpdateresultAndStartScript(RunState.ServerDir, RunState.UpdateId, "Wipe validation failed: server identity directory doesn't exist", RunState.StartScript);
+                        return false;
+
+                    }
+                    else
+                    {
+                        if (!Directory.Exists(RunState.ServerDir + "\\server\\" + RunState.ServerIdentity + "\\cfg"))
+                        {
+                            Logger.Error($"{kind.ToString().ToUpper()} validation failed: server cfg directory inside server identity doesn't exist");
+                            CreateUpdateresultAndStartScript(RunState.ServerDir, RunState.UpdateId, "Wipe validation failed: server cfg directory inside server identity doesn't exist", RunState.StartScript);
+                            return false;
+                        }
+                        else
+                        {
+                            if(!File.Exists(RunState.ServerDir + "\\server\\" + RunState.ServerIdentity + "\\cfg" + "\\server.cfg"))
+                            {
+                                Logger.Error($"{kind.ToString().ToUpper()} validation failed: server.cfg not found");
+                                CreateUpdateresultAndStartScript(RunState.ServerDir, RunState.UpdateId, "Wipe validation failed: server.cfg not found", RunState.StartScript);
+                                return false;
+                            }
+
+                        }
+                    }
+                }
+                if (RuntimeInformation.IsOSPlatform(OSPlatform.Linux))
+                {
+                    if (!string.IsNullOrEmpty(RunState.NextWipeDelPluginsData))
+                    {
+                        if (!Directory.Exists(RunState.ServerDir + "/oxide/data"))
+                        {
+                            Logger.Error($"{kind.ToString().ToUpper()} validation failed: plugin data directory doesn't exist");
+                            CreateUpdateresultAndStartScript(RunState.ServerDir, RunState.UpdateId, "Wipe validation failed: plugin data directory doesn't exist", RunState.StartScript);
+                            return false;
+                        }
+                    }
+                    if (!Directory.Exists(RunState.ServerDir + "/server/" + RunState.ServerIdentity))
+                    {
+                        Logger.Error($"{kind.ToString().ToUpper()} validation failed: server identity directory doesn't exist");
+                        CreateUpdateresultAndStartScript(RunState.ServerDir, RunState.UpdateId, "Wipe validation failed: server identity directory doesn't exist", RunState.StartScript);
+                        return false;
+
+                    }
+                    else
+                    {
+                        if (!Directory.Exists(RunState.ServerDir + "/server/" + RunState.ServerIdentity + "/cfg"))
+                        {
+                            Logger.Error($"{kind.ToString().ToUpper()} validation failed: server cfg directory inside server identity doesn't exist");
+                            CreateUpdateresultAndStartScript(RunState.ServerDir, RunState.UpdateId, "Wipe validation failed: server cfg directory inside server identity doesn't exist", RunState.StartScript);
+                            return false;
+                        }
+                        else
+                        {
+                            if (!File.Exists(RunState.ServerDir + "/server/" + RunState.ServerIdentity + "/cfg" + "/server.cfg"))
+                            {
+                                Logger.Error($"{kind.ToString().ToUpper()} validation failed: server.cfg not found");
+                                CreateUpdateresultAndStartScript(RunState.ServerDir, RunState.UpdateId, "Wipe validation failed: server.cfg not found", RunState.StartScript);
+                                return false;
+                            }
+
+                        }
+                    }
+                }
+                return true;
+            }
+            else if (kind == FlowKind.Init || kind == FlowKind.Testrun)
             {
                 if (!string.Equals(RunState.What, "both", StringComparison.OrdinalIgnoreCase))
                 {
@@ -421,6 +686,103 @@ namespace FeedMeUpdates
             }
             else
             {
+                if(RunState.IsForce)
+                {
+                    if (string.IsNullOrEmpty(RunState.ServerDir))
+                    {
+                        Logger.Error($"{kind.ToString().ToUpper()} validation failed: server dir not specified");
+                        CreateUpdateresultAndStartScript(RunState.ServerDir, RunState.UpdateId, "ForceWipe validation failed: server dir not specified", RunState.StartScript);
+                        return false;
+                    }
+                    else
+                    {
+                        if (!Directory.Exists(RunState.ServerDir))
+                        {
+                            Logger.Error($"{kind.ToString().ToUpper()} validation failed: server directory doesn't exist");
+                            CreateUpdateresultAndStartScript(RunState.ServerDir, RunState.UpdateId, "ForceWipe validation failed: server directory doesn't exist", RunState.StartScript);
+                            return false;
+                        }
+                    }
+                    if (string.IsNullOrEmpty(RunState.ServerIdentity))
+                        RunState.ServerIdentity = "my_server_identity";
+
+                    if (RuntimeInformation.IsOSPlatform(OSPlatform.Windows))
+                    {
+                        if (!string.IsNullOrEmpty(RunState.NextWipeDelPluginsData))
+                        {
+                            if (!Directory.Exists(RunState.ServerDir + "\\oxide\\data"))
+                            {
+                                Logger.Error($"{kind.ToString().ToUpper()} validation failed: plugin data directory doesn't exist");
+                                CreateUpdateresultAndStartScript(RunState.ServerDir, RunState.UpdateId, "ForceWipe validation failed: plugin data directory doesn't exist", RunState.StartScript);
+                                return false;
+                            }
+                        }
+                        if (!Directory.Exists(RunState.ServerDir + "\\server\\" + RunState.ServerIdentity))
+                        {
+                            Logger.Error($"{kind.ToString().ToUpper()} validation failed: server identity directory doesn't exist");
+                            CreateUpdateresultAndStartScript(RunState.ServerDir, RunState.UpdateId, "ForceWipe validation failed: server identity directory doesn't exist", RunState.StartScript);
+                            return false;
+
+                        }
+                        else
+                        {
+                            if (!Directory.Exists(RunState.ServerDir + "\\server\\" + RunState.ServerIdentity + "\\cfg"))
+                            {
+                                Logger.Error($"{kind.ToString().ToUpper()} validation failed: server cfg directory inside server identity doesn't exist");
+                                CreateUpdateresultAndStartScript(RunState.ServerDir, RunState.UpdateId, "ForceWipe validation failed: server cfg directory inside server identity doesn't exist", RunState.StartScript);
+                                return false;
+                            }
+                            else
+                            {
+                                if (!File.Exists(RunState.ServerDir + "\\server\\" + RunState.ServerIdentity + "\\cfg" + "\\server.cfg"))
+                                {
+                                    Logger.Error($"{kind.ToString().ToUpper()} validation failed: server.cfg not found");
+                                    CreateUpdateresultAndStartScript(RunState.ServerDir, RunState.UpdateId, "ForceWipe validation failed: server.cfg not found", RunState.StartScript);
+                                    return false;
+                                }
+
+                            }
+                        }
+                    }
+                    if (RuntimeInformation.IsOSPlatform(OSPlatform.Linux))
+                    {
+                        if (!string.IsNullOrEmpty(RunState.NextWipeDelPluginsData))
+                        {
+                            if (!Directory.Exists(RunState.ServerDir + "/oxide/data"))
+                            {
+                                Logger.Error($"{kind.ToString().ToUpper()} validation failed: plugin data directory doesn't exist");
+                                CreateUpdateresultAndStartScript(RunState.ServerDir, RunState.UpdateId, "ForceWipe validation failed: plugin data directory doesn't exist", RunState.StartScript);
+                                return false;
+                            }
+                        }
+                        if (!Directory.Exists(RunState.ServerDir + "/server/" + RunState.ServerIdentity))
+                        {
+                            Logger.Error($"{kind.ToString().ToUpper()} validation failed: server identity directory doesn't exist");
+                            CreateUpdateresultAndStartScript(RunState.ServerDir, RunState.UpdateId, "ForceWipe validation failed: server identity directory doesn't exist", RunState.StartScript);
+                            return false;
+
+                        }
+                        else
+                        {
+                            if (!Directory.Exists(RunState.ServerDir + "/server/" + RunState.ServerIdentity + "/cfg"))
+                            {
+                                Logger.Error($"{kind.ToString().ToUpper()} validation failed: server cfg directory inside server identity doesn't exist");
+                                CreateUpdateresultAndStartScript(RunState.ServerDir, RunState.UpdateId, "ForceWipe validation failed: server cfg directory inside server identity doesn't exist", RunState.StartScript);
+                                return false;
+                            }
+                            else
+                            {
+                                if (!File.Exists(RunState.ServerDir + "/server/" + RunState.ServerIdentity + "/cfg" + "/server.cfg"))
+                                {
+                                    Logger.Error($"{kind.ToString().ToUpper()} validation failed: server.cfg not found");
+                                    CreateUpdateresultAndStartScript(RunState.ServerDir, RunState.UpdateId, "ForceWipe validation failed: server.cfg not found", RunState.StartScript);
+                                    return false;
+                                }
+
+                            }
+                        }
+                    }
+                }
                 if (!string.Equals(RunState.What, "both", StringComparison.OrdinalIgnoreCase) &&
                     !string.Equals(RunState.What, "server", StringComparison.OrdinalIgnoreCase) &&
                     !string.Equals(RunState.What, "oxide", StringComparison.OrdinalIgnoreCase))
@@ -494,17 +856,21 @@ namespace FeedMeUpdates
             return true;
         }
 
-        /// <summary>Returns true if server update is requested or both.</summary>
+    #endregion
+
+    #region Helpers and utilities
+
+        // Return true if server update requested or both.
         private static bool IsWhatServerOrBoth() =>
             string.Equals(RunState.What, "both", StringComparison.OrdinalIgnoreCase) ||
             string.Equals(RunState.What, "server", StringComparison.OrdinalIgnoreCase);
 
-        /// <summary>Returns true if oxide update is requested or both.</summary>
+        // Return true if oxide update requested or both.
         private static bool IsWhatOxideOrBoth() =>
             string.Equals(RunState.What, "both", StringComparison.OrdinalIgnoreCase) ||
             string.Equals(RunState.What, "oxide", StringComparison.OrdinalIgnoreCase);
 
-        /// <summary>Runs server update and restores from backup on failure.</summary>
+        // Run server update and restore on failure.
         private static bool RunUpdateServerWithRestoreOnFail(FlowKind kind, string backupPath)
         {
             Logger.Info($"{kind.ToString().ToUpper()}: Starting server update...");
@@ -522,7 +888,7 @@ namespace FeedMeUpdates
             return true;
         }
 
-        /// <summary>Runs oxide update and restores from backup on failure.</summary>
+        // Run oxide update and restore on failure.
         private static bool RunUpdateOxideWithRestoreOnFail(FlowKind kind, string backupPath)
         {
             Logger.Info($"{kind.ToString().ToUpper()}: Starting Oxide update...");
@@ -540,7 +906,7 @@ namespace FeedMeUpdates
             return true;
         }
 
-        /// <summary>Splits a flag token into key and value.</summary>
+        // Split a flag token "-key=val" into key and value.
         private static (string key, string value) SplitFlagToken(string token)
         {
             var t = token.TrimStart('-');
@@ -554,7 +920,7 @@ namespace FeedMeUpdates
             return (t, "");
         }
 
-        /// <summary>Parses command-line tokens into a dictionary of key/value pairs.</summary>
+        // Parse command-line key/value tokens into dictionary.
         private static Dictionary<string, string> ParseKeyValueArgs(string[] tokens)
         {
             var d = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
@@ -585,7 +951,7 @@ namespace FeedMeUpdates
             return d;
         }
 
-        /// <summary>Parses a string into boolean supporting extra numeric forms.</summary>
+        // Parse flexible boolean argument forms.
         private static bool ParseBool(string? s)
         {
             if (string.IsNullOrEmpty(s)) return false;
@@ -595,7 +961,7 @@ namespace FeedMeUpdates
             return false;
         }
 
-        /// <summary>Waits for the Rust process or service to stop before continuing.</summary>
+        // Wait for Rust server (process or service) to stop and run autoupdate task.
         private static void WaitForRustDedicatedAndLog()
         {
             if (!RunState.IsService)
@@ -618,9 +984,304 @@ namespace FeedMeUpdates
                 }
                 Logger.Info($"{RunState.ServiceName} service stopped.");
             }
+            bool result = AutoUpdateTask();
+            if (result)
+            {
+                Logger.Info("Autoupdate process completed. System updated.");
+            }
+            else
+            {
+                Logger.Info("Autoupdate process completed.");
+            }
         }
 
-        /// <summary>Checks if a service is still running on the host platform.</summary>
+    #endregion
+
+    #region Auto-update and remote release helpers
+
+        // Perform plugin self-update (FMU) if a newer release exists.
+        private static bool AutoUpdateTask()
+        {
+            string pFile = "";
+            if (RuntimeInformation.IsOSPlatform(OSPlatform.Windows))
+            {
+                pFile = RunState.ServerDir + @"\oxide\plugins\FeedMeUpdates.cs";
+            }
+            else
+            {
+                pFile = RunState.ServerDir + "/oxide/plugins/FeedMeUpdates.cs";
+            }
+            var meta = ParseInfoAttribute(pFile);
+            if (meta == null)
+            {
+                Logger.Warn($"Unable to get local FMU version from plugin file.");
+                return false;
+            }
+
+            FMU_VERSION = meta.Version;
+
+            Logger.Info("Current FeedMeUpdates version is: " + FMU_VERSION);
+            Logger.Info("Scanning Github repository for newer version.");
+            var (rTag, dUrl) = GetRemoteFMURelease();
+            if (rTag != "no" && dUrl != "")
+            {
+                int comp = CompareVersionStrings(rTag, FMU_VERSION);
+                if (comp <= 0)
+                {
+                    Logger.Info("No FMU updates required.");
+                    return true;
+                }
+                else
+                {
+                    string extractRoot = Path.Combine(Path.GetTempPath(), "FMU_extracted_" + Guid.NewGuid().ToString("N"));
+                    string tempZip = Path.Combine(Path.GetTempPath(), "FMU_update_" + Guid.NewGuid().ToString("N") + ".zip");
+                    try
+                    {
+                        Logger.Info("A newer version of FMU has been found. Proceeding with update.");
+                        Logger.Info($"Downloading FMU to temporary file: {tempZip}");
+
+                        using (var http = new HttpClient { Timeout = TimeSpan.FromMinutes(5) })
+                        {
+                            http.DefaultRequestHeaders.UserAgent.ParseAdd("FeedMeUpdates/1.0");
+                            HttpResponseMessage resp;
+                            try
+                            {
+                                resp = http.GetAsync(dUrl).GetAwaiter().GetResult();
+                                resp.EnsureSuccessStatusCode();
+                            }
+                            catch (Exception ex)
+                            {
+                                Logger.Error($"Download failed: {ex.Message}");
+                                try { if (File.Exists(tempZip)) File.Delete(tempZip); } catch { }
+                                return false;
+                            }
+
+                            try
+                            {
+                                using var fs = new FileStream(tempZip, FileMode.Create, FileAccess.Write, FileShare.None);
+                                resp.Content.CopyToAsync(fs).GetAwaiter().GetResult();
+                            }
+                            catch (Exception ex)
+                            {
+                                Logger.Error($"Error writing temp file: {ex.Message}");
+                                try { if (File.Exists(tempZip)) File.Delete(tempZip); } catch { }
+                                return false;
+                            }
+                        }
+
+                        var fi = new FileInfo(tempZip);
+                        if (!fi.Exists || fi.Length == 0)
+                        {
+                            Logger.Error("Downloaded file is missing or zero-length.");
+                            try { if (File.Exists(tempZip)) File.Delete(tempZip); } catch { }
+                            return false;
+                        }
+
+                        Directory.CreateDirectory(extractRoot);
+                        Logger.Info($"Extracting '{tempZip}' to '{extractRoot}'");
+                        try
+                        {
+                            ZipFile.ExtractToDirectory(tempZip, extractRoot, overwriteFiles: true);
+                        }
+                        catch (Exception ex)
+                        {
+                            Logger.Error($"Extraction failed: {ex.Message}");
+                            try { if (Directory.Exists(extractRoot)) Directory.Delete(extractRoot, true); } catch { }
+                            try { if (File.Exists(tempZip)) File.Delete(tempZip); } catch { }
+                            return false;
+                        }
+
+                        var origin = FindExtractOrigin(extractRoot) ?? extractRoot;
+                        Logger.Info($"Using origin folder: {origin}");
+
+                        try
+                        {
+                            foreach(string file in Directory.GetFiles(origin, "*", SearchOption.AllDirectories))
+                            {
+                                if(file.EndsWith("FeedMeUpdates.cs"))
+                                {
+                                    File.Delete(pFile);
+                                    File.Move(file, pFile);
+                                }
+                                if(file.EndsWith("FeedMeUpdates") || file.EndsWith("FeedMeUpdates.exe"))
+                                {
+                                    if (RuntimeInformation.IsOSPlatform(OSPlatform.Windows))
+                                    {
+                                        File.Delete(RunState.ServerDir + @"\FeedMeUpdates.exe.new");
+                                        File.Move(file, RunState.ServerDir + @"\FeedMeUpdates.exe.new");
+                                    }
+                                    else
+                                    {
+                                        File.Delete(RunState.ServerDir + "/FeedMeUpdates.new");
+                                        File.Move(file, RunState.ServerDir + "/FeedMeUpdates.new");
+                                    }
+                                }
+                                if (file.EndsWith("FMU_CHECKSUMS.txt"))
+                                {
+                                    if (RuntimeInformation.IsOSPlatform(OSPlatform.Windows))
+                                    {
+                                        File.Delete(RunState.ServerDir + @"\FMU_CHECKSUMS.txt");
+                                        File.Move(file, RunState.ServerDir + @"\FMU_CHECKSUMS.txt");
+                                    }
+                                    else
+                                    {
+                                        File.Delete(RunState.ServerDir + "/FMU_CHECKSUMS.txt");
+                                        File.Move(file, RunState.ServerDir + "/FMU_CHECKSUMS.txt");
+                                    }
+                                }
+                            }
+                        }
+                        catch (Exception ex)
+                        {
+                            Logger.Error($"Error copying FMU files: {ex.Message}");
+                            try { if (Directory.Exists(extractRoot)) Directory.Delete(extractRoot, true); } catch { }
+                            try { if (File.Exists(tempZip)) File.Delete(tempZip); } catch { }
+                            return false;
+                        }
+
+                        try { if (Directory.Exists(extractRoot)) Directory.Delete(extractRoot, true); } catch { }
+                        try { if (File.Exists(tempZip)) File.Delete(tempZip); } catch { }
+
+                        Logger.Info("FMU plugin successfully updated, .new file created and checksum file created.");
+                        return true;
+                    }
+                    catch (Exception ex)
+                    {
+                        Logger.Error($"Unexpected exception: {ex.Message}");
+                        try { if (!string.IsNullOrEmpty(extractRoot) && Directory.Exists(extractRoot)) Directory.Delete(extractRoot, true); } catch { }
+                        try { if (!string.IsNullOrEmpty(tempZip) && File.Exists(tempZip)) File.Delete(tempZip); } catch { }
+                        return false;
+                    }
+
+                }
+            }
+            return false;
+        }
+
+        // Detect if running against shared framework or self-contained.
+        private static bool IsFrameworkDependent()
+        {
+            var fxDepsFile = AppContext.GetData("FX_DEPS_FILE") as string;
+            var fxDepsFolder = AppContext.GetData("FX_DEPS_FOLDER") as string;
+
+            if (!string.IsNullOrEmpty(fxDepsFile) || !string.IsNullOrEmpty(fxDepsFolder))
+                return true;
+
+            var appContextDeps = AppContext.GetData("APP_CONTEXT_DEPS_FILES") as string;
+
+            return false;
+        }
+
+        // Query GitHub releases for FMU and pick suitable asset URL.
+        private static (string tag, string url) GetRemoteFMURelease()
+        {
+            try
+            {
+                var api = "https://api.github.com/repos/frankie290651/FeedMeUpdates/releases/latest";
+                using var http = new HttpClient { Timeout = TimeSpan.FromSeconds(20) };
+                http.DefaultRequestHeaders.UserAgent.ParseAdd("FeedMeUpdates/1.0");
+                var resp = http.GetAsync(api).GetAwaiter().GetResult();
+                if (!resp.IsSuccessStatusCode)
+                {
+                    Logger.Warn($"GetRemoteFMURelease: GitHub API returned {(int)resp.StatusCode} {resp.ReasonPhrase}");
+                    return ("no", "");
+                }
+
+                var content = resp.Content.ReadAsStringAsync().GetAwaiter().GetResult();
+                using var doc = JsonDocument.Parse(content);
+                var root = doc.RootElement;
+
+                string tag = "";
+                if (root.TryGetProperty("tag_name", out var tagElem) && tagElem.ValueKind == JsonValueKind.String)
+                {
+                    tag = tagElem.GetString() ?? "";
+                }
+                else if (root.TryGetProperty("name", out var nameElem) && nameElem.ValueKind == JsonValueKind.String)
+                {
+                    tag = nameElem.GetString() ?? "";
+                }
+
+                string chosenUrl = "";
+                var assets = new List<(string name, string url)>();
+                if (root.TryGetProperty("assets", out var assetsElem) && assetsElem.ValueKind == JsonValueKind.Array)
+                {
+                    foreach (var a in assetsElem.EnumerateArray())
+                    {
+                        try
+                        {
+                            string name = a.GetProperty("name").GetString() ?? "";
+                            string url = a.GetProperty("browser_download_url").GetString() ?? "";
+                            if (!string.IsNullOrEmpty(url))
+                                assets.Add((name.ToLowerInvariant(), url));
+                        }
+                        catch { }
+                    }
+                }
+
+                bool isWindows = RuntimeInformation.IsOSPlatform(OSPlatform.Windows);
+                isStandalone = !IsFrameworkDependent();
+
+                if (assets.Count > 0)
+                {
+
+                    foreach (var a in assets)
+                    {
+                        if(a.name.Contains("win"))
+                        {
+                            if(a.name.Contains("standalone"))
+                            {
+                                if(isWindows && isStandalone)
+                                {
+                                    chosenUrl = a.url;
+                                    break;
+                                }
+                            }
+                            else
+                            {
+                                if (isWindows && !isStandalone)
+                                {
+                                    chosenUrl = a.url;
+                                    break;
+                                }
+                            }
+                        }
+                        else
+                        {
+                            if (a.name.Contains("standalone"))
+                            {
+                                if (!isWindows && isStandalone)
+                                {
+                                    chosenUrl = a.url;
+                                    break;
+                                }
+                            }
+                            else
+                            {
+                                if (!isWindows && !isStandalone)
+                                {
+                                    chosenUrl = a.url;
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                    Logger.Info($"GetRemoteFMURelease: tag='{tag}' url='{chosenUrl}'");
+                    return (tag, chosenUrl);
+                }
+            }
+            catch (Exception ex)
+            {
+                Logger.Error($"GetRemoteFMURelease: exception: {ex.Message}");
+                return ("no", "");
+            }
+            return ("no", "");
+        }
+
+    #endregion
+
+    #region Process and system helpers
+
+        // Check if a service is running.
         private static bool IsServiceRunning(string srvName)
         {
             if (string.IsNullOrWhiteSpace(srvName))
@@ -685,7 +1346,7 @@ namespace FeedMeUpdates
             }
         }
 
-        /// <summary>Checks if a process with given name is running.</summary>
+        // Check if a process with the specified name is running.
         private static bool IsProcessRunning(string procName)
         {
             try
@@ -699,7 +1360,7 @@ namespace FeedMeUpdates
             }
         }
 
-        /// <summary>Starts the server start script (or window/tmux) based on platform and flags.</summary>
+        // Start the server start script using platform-aware methods.
         private static void StartServerScript(string scriptPath, string workingDirectory)
         {
             Logger.Info($"[StartServerScript] Enter: scriptPath='{scriptPath}' workDir='{workingDirectory}' ShowServerConsole={RunState.ShowServerConsole} IsService={RunState.IsService} ServerTmux='{RunState.ServerTmux}'");
@@ -937,7 +1598,11 @@ namespace FeedMeUpdates
             }
         }
 
-        /// <summary>Creates a temporary backup of the server directory (excluding updater artifacts).</summary>
+    #endregion
+
+    #region Backup and restore
+
+        // Create temporary backup of server folder excluding updater artifacts.
         private static bool CreateTempBackup(string serverDir, string update_id, out string backupPath)
         {
             backupPath = "";
@@ -962,7 +1627,7 @@ namespace FeedMeUpdates
 
                 try
                 {
-                    var exeNames = new[] { "FeedMeUpdate.exe", "FeedMeUpdate" };
+                    var exeNames = new[] { "FeedMeUpdates.exe", "FeedMeUpdates" };
                     foreach (var nm in exeNames)
                     {
                         var p = Path.Combine(serverDir, nm);
@@ -1013,7 +1678,7 @@ namespace FeedMeUpdates
             }
         }
 
-        /// <summary>Restores server files from the temporary backup and marks failure.</summary>
+        // Restore server files from temporary backup and write failure marker.
         private static bool RestoreFromBackupOrFail(string serverDir, string backupFolder, string update_id, string start_script)
         {
             try
@@ -1143,7 +1808,7 @@ namespace FeedMeUpdates
             }
         }
 
-        /// <summary>Handles a failed restore attempt and writes failure markers.</summary>
+        // Handle failed restore attempts and write failure markers.
         private static void HandleRestoreFailure(string server_dir, string update_id, string start_script)
         {
             try
@@ -1191,7 +1856,11 @@ namespace FeedMeUpdates
             Environment.Exit(0);
         }
 
-        /// <summary>Runs an external process and captures combined output text.</summary>
+    #endregion
+
+    #region Process execution helpers
+
+        // Run a process and capture combined stdout/stderr.
         private static string RunProcessCaptureOutput(string exe, string args, TimeSpan timeout)
         {
             try
@@ -1228,7 +1897,7 @@ namespace FeedMeUpdates
             }
         }
 
-        /// <summary>Runs an external process and returns its exit code logging output lines.</summary>
+        // Run a process and return its exit code while logging output.
         private static int RunProcessCaptureExitCode(string exe, string args, TimeSpan timeout)
         {
             try
@@ -1266,7 +1935,11 @@ namespace FeedMeUpdates
             }
         }
 
-        /// <summary>Retrieves the remote Rust build ID using steamcmd parsing heuristics.</summary>
+    #endregion
+
+    #region Remote queries (SteamCMD and Oxide)
+
+        // Retrieve remote Rust build id via steamcmd output heuristics.
         private static string GetRemoteRustBuild()
         {
             try
@@ -1370,7 +2043,7 @@ namespace FeedMeUpdates
             }
         }
 
-        /// <summary>Fetches latest Oxide release tag and a suitable asset URL from GitHub.</summary>
+        // Fetch latest Oxide release tag and select an asset URL.
         private static (string tag, string url) GetRemoteOxideRelease()
         {
             try
@@ -1485,7 +2158,11 @@ namespace FeedMeUpdates
             }
         }
 
-        /// <summary>Updates the Rust server using steamcmd with retries and diagnostics.</summary>
+    #endregion
+
+    #region Update operations
+
+        // Update Rust server via steamcmd with retries and error heuristics.
         private static bool UpdateServer()
         {
             try
@@ -1665,7 +2342,7 @@ namespace FeedMeUpdates
             }
         }
 
-        /// <summary>Updates Oxide by downloading latest release and copying relevant files.</summary>
+        // Update Oxide by downloading and copying release files.
         private static bool UpdateOxide()
         {
             string tempZip = "";
@@ -1812,7 +2489,11 @@ namespace FeedMeUpdates
             }
         }
 
-        /// <summary>Checks and updates plugins from uMod if newer versions are available.</summary>
+    #endregion
+
+    #region Plugin update pass
+
+        // Update installed uMod plugins by checking uMod API and replacing .cs files if newer.
         private static bool UpdatePlugins()
         {
             bool hadError = false;
@@ -1850,201 +2531,204 @@ namespace FeedMeUpdates
                 int requestsPerMinute = 30;
                 foreach (var f in pluginFiles)
                 {
-                    try
+                    if (!f.EndsWith("FeedMeUpdates.cs"))
                     {
-                        Logger.Info($"[UpdatePlugins] Checking plugin file: {Path.GetFileName(f)}");
-                        var meta = ParseInfoAttribute(f);
-                        if (meta == null)
-                        {
-                            Logger.Warn($"[UpdatePlugins] Skipping {Path.GetFileName(f)}: [Info(...)] attribute not found or unparsable.");
-                            continue;
-                        }
-
-                        var localTitle = meta.Title;
-                        var localAuthor = meta.Author;
-                        var localVersion = meta.Version;
-                        var baseLocalName = Path.GetFileNameWithoutExtension(f);
-                        var className = GetClassNameFromCs(f);
-
-                        if (string.IsNullOrEmpty(localVersion))
-                        {
-                            Logger.Warn($"[UpdatePlugins] {Path.GetFileName(f)}: local version missing in [Info(...)] -> skipping.");
-                            continue;
-                        }
-
-                        Logger.Info($"[UpdatePlugins] {Path.GetFileName(f)} meta: title='{localTitle}' author='{localAuthor}' version='{localVersion}' class='{className}'");
-
-                        ThrottleIfNeeded(requestsPerMinute);
-
-                        var encodedTitle = Uri.EscapeDataString(localTitle ?? "");
-                        var searchUrl = $"https://umod.org/plugins/search.json?query={encodedTitle}&page=1&sort=title&sortdir=asc";
-
-                        Logger.Info($"[UpdatePlugins] Searching uMod for '{localTitle}' via: {searchUrl}");
-                        string respContent;
                         try
                         {
-                            respContent = http.GetStringAsync(searchUrl).GetAwaiter().GetResult();
-                        }
-                        catch (Exception ex)
-                        {
-                            Logger.Error($"[UpdatePlugins] HTTP search error for {Path.GetFileName(f)}: {ex.Message}");
-                            hadError = true;
-                            continue;
-                        }
+                            Logger.Info($"[UpdatePlugins] Checking plugin file: {Path.GetFileName(f)}");
+                            var meta = ParseInfoAttribute(f);
+                            if (meta == null)
+                            {
+                                Logger.Warn($"[UpdatePlugins] Skipping {Path.GetFileName(f)}: [Info(...)] attribute not found or unparsable.");
+                                continue;
+                            }
 
-                        using var doc = JsonDocument.Parse(respContent);
-                        if (!doc.RootElement.TryGetProperty("data", out var data) || data.ValueKind != JsonValueKind.Array || data.GetArrayLength() == 0)
-                        {
-                            Logger.Warn($"[UpdatePlugins] No results from uMod search for '{localTitle}'.");
-                            continue;
-                        }
+                            var localTitle = meta.Title;
+                            var localAuthor = meta.Author;
+                            var localVersion = meta.Version;
+                            var baseLocalName = Path.GetFileNameWithoutExtension(f);
+                            var className = GetClassNameFromCs(f);
 
-                        var candidates = new List<JsonElement>();
-                        foreach (var item in data.EnumerateArray())
-                        {
+                            if (string.IsNullOrEmpty(localVersion))
+                            {
+                                Logger.Warn($"[UpdatePlugins] {Path.GetFileName(f)}: local version missing in [Info(...)] -> skipping.");
+                                continue;
+                            }
+
+                            Logger.Info($"[UpdatePlugins] {Path.GetFileName(f)} meta: title='{localTitle}' author='{localAuthor}' version='{localVersion}' class='{className}'");
+
+                            ThrottleIfNeeded(requestsPerMinute);
+
+                            var encodedTitle = Uri.EscapeDataString(localTitle ?? "");
+                            var searchUrl = $"https://umod.org/plugins/search.json?query={encodedTitle}&page=1&sort=title&sortdir=asc";
+
+                            Logger.Info($"[UpdatePlugins] Searching uMod for '{localTitle}' via: {searchUrl}");
+                            string respContent;
                             try
                             {
-                                if (!item.TryGetProperty("download_url", out var downloadUrlElem)) continue;
-                                var downloadUrl = downloadUrlElem.GetString() ?? "";
-                                var remoteFile = GetFileNameFromUrl(downloadUrl);
-                                var baseRemote = Path.GetFileNameWithoutExtension(remoteFile);
-                                if (string.Equals(baseRemote, baseLocalName, StringComparison.OrdinalIgnoreCase) ||
-                                    string.Equals(baseRemote, className, StringComparison.OrdinalIgnoreCase))
-                                {
-                                    candidates.Add(item);
-                                }
+                                respContent = http.GetStringAsync(searchUrl).GetAwaiter().GetResult();
                             }
-                            catch { }
-                        }
+                            catch (Exception ex)
+                            {
+                                Logger.Error($"[UpdatePlugins] HTTP search error for {Path.GetFileName(f)}: {ex.Message}");
+                                hadError = true;
+                                continue;
+                            }
 
-                        if (candidates.Count == 0)
-                        {
-                            Logger.Warn($"[UpdatePlugins] No candidate found for {Path.GetFileName(f)} in uMod search results.");
-                            continue;
-                        }
+                            using var doc = JsonDocument.Parse(respContent);
+                            if (!doc.RootElement.TryGetProperty("data", out var data) || data.ValueKind != JsonValueKind.Array || data.GetArrayLength() == 0)
+                            {
+                                Logger.Warn($"[UpdatePlugins] No results from uMod search for '{localTitle}'.");
+                                continue;
+                            }
 
-                        JsonElement match;
-                        if (candidates.Count > 1)
-                        {
-                            var filteredByVersion = new List<JsonElement>();
-                            foreach (var cnd in candidates)
+                            var candidates = new List<JsonElement>();
+                            foreach (var item in data.EnumerateArray())
                             {
                                 try
                                 {
-                                    if (cnd.TryGetProperty("latest_release_version", out var v) && v.ValueKind == JsonValueKind.String)
+                                    if (!item.TryGetProperty("download_url", out var downloadUrlElem)) continue;
+                                    var downloadUrl = downloadUrlElem.GetString() ?? "";
+                                    var remoteFile = GetFileNameFromUrl(downloadUrl);
+                                    var baseRemote = Path.GetFileNameWithoutExtension(remoteFile);
+                                    if (string.Equals(baseRemote, baseLocalName, StringComparison.OrdinalIgnoreCase) ||
+                                        string.Equals(baseRemote, className, StringComparison.OrdinalIgnoreCase))
                                     {
-                                        var rv = v.GetString();
-                                        var cmp = CompareVersionStrings(rv, localVersion);
-                                        if (cmp >= 0) filteredByVersion.Add(cnd);
+                                        candidates.Add(item);
                                     }
                                 }
                                 catch { }
                             }
 
-                            if (filteredByVersion.Count == 1)
+                            if (candidates.Count == 0)
                             {
-                                match = filteredByVersion[0];
-                                Logger.Info($"[UpdatePlugins] Disambiguated by version (single candidate remaining).");
+                                Logger.Warn($"[UpdatePlugins] No candidate found for {Path.GetFileName(f)} in uMod search results.");
+                                continue;
+                            }
+
+                            JsonElement match;
+                            if (candidates.Count > 1)
+                            {
+                                var filteredByVersion = new List<JsonElement>();
+                                foreach (var cnd in candidates)
+                                {
+                                    try
+                                    {
+                                        if (cnd.TryGetProperty("latest_release_version", out var v) && v.ValueKind == JsonValueKind.String)
+                                        {
+                                            var rv = v.GetString();
+                                            var cmp = CompareVersionStrings(rv, localVersion);
+                                            if (cmp >= 0) filteredByVersion.Add(cnd);
+                                        }
+                                    }
+                                    catch { }
+                                }
+
+                                if (filteredByVersion.Count == 1)
+                                {
+                                    match = filteredByVersion[0];
+                                    Logger.Info($"[UpdatePlugins] Disambiguated by version (single candidate remaining).");
+                                }
+                                else
+                                {
+                                    Logger.Warn($"[UpdatePlugins] Ambiguous candidates for {Path.GetFileName(f)} ({candidates.Count}) -> skipping update for this plugin.");
+                                    continue;
+                                }
                             }
                             else
                             {
-                                Logger.Warn($"[UpdatePlugins] Ambiguous candidates for {Path.GetFileName(f)} ({candidates.Count}) -> skipping update for this plugin.");
+                                match = candidates[0];
+                            }
+
+                            string remoteVersion = "";
+                            if (match.TryGetProperty("latest_release_version", out var rvElem) && rvElem.ValueKind == JsonValueKind.String)
+                                remoteVersion = rvElem.GetString() ?? "";
+
+                            if (string.IsNullOrEmpty(remoteVersion))
+                            {
+                                Logger.Warn($"[UpdatePlugins] Remote candidate has no version for {Path.GetFileName(f)} -> skipping.");
+                                continue;
+                            }
+
+                            var cmpFinal = CompareVersionStrings(remoteVersion, localVersion);
+                            if (cmpFinal <= 0)
+                            {
+                                Logger.Info($"[UpdatePlugins] {Path.GetFileName(f)} is up-to-date (remote {remoteVersion} <= local {localVersion}).");
+                                continue;
+                            }
+
+                            Logger.Info($"[UpdatePlugins] Newer version found for {Path.GetFileName(f)}: remote={remoteVersion} local={localVersion}. Preparing download...");
+
+                            if (!match.TryGetProperty("download_url", out var downloadElem))
+                            {
+                                Logger.Error($"[UpdatePlugins] Download URL missing on selected match for {Path.GetFileName(f)}.");
+                                hadError = true;
+                                continue;
+                            }
+                            var downloadUrlFinal = downloadElem.GetString() ?? "";
+                            if (string.IsNullOrEmpty(downloadUrlFinal))
+                            {
+                                Logger.Error($"[UpdatePlugins] Download URL empty for {Path.GetFileName(f)}.");
+                                hadError = true;
+                                continue;
+                            }
+
+                            ThrottleIfNeeded(requestsPerMinute);
+
+                            var tempFileName = Guid.NewGuid().ToString() + ".temp";
+                            var tempFilePath = Path.Combine(pluginsFolder, tempFileName);
+                            Logger.Info($"[UpdatePlugins] Downloading update to temp file {tempFileName} from {downloadUrlFinal}");
+
+                            try
+                            {
+                                using var resp = http.GetAsync(downloadUrlFinal).GetAwaiter().GetResult();
+                                resp.EnsureSuccessStatusCode();
+                                using var fs = new FileStream(tempFilePath, FileMode.Create, FileAccess.Write, FileShare.None);
+                                resp.Content.CopyToAsync(fs).GetAwaiter().GetResult();
+                            }
+                            catch (Exception ex)
+                            {
+                                Logger.Error($"[UpdatePlugins] Download failed for {Path.GetFileName(f)}: {ex.Message}");
+                                try { if (File.Exists(tempFilePath)) File.Delete(tempFilePath); } catch { }
+                                hadError = true;
+                                continue;
+                            }
+
+                            var fi = new FileInfo(tempFilePath);
+                            if (!fi.Exists || fi.Length == 0)
+                            {
+                                Logger.Error($"[UpdatePlugins] Temp download missing or zero-length for {Path.GetFileName(f)}.");
+                                try { if (File.Exists(tempFilePath)) File.Delete(tempFilePath); } catch { }
+                                hadError = true;
+                                continue;
+                            }
+
+                            var finalPath = Path.Combine(pluginsFolder, Path.GetFileName(f));
+                            try
+                            {
+                                if (File.Exists(finalPath))
+                                {
+                                    Logger.Info($"[UpdatePlugins] Removing existing plugin file before replace: {finalPath}");
+                                    File.Delete(finalPath);
+                                }
+                                File.Move(tempFilePath, finalPath);
+                                Logger.Info($"[UpdatePlugins] Plugin {Path.GetFileName(f)} updated successfully to {remoteVersion}");
+                                RunState.UpdatedPlugins.Add(Path.GetFileName(finalPath));
+                            }
+                            catch (Exception ex)
+                            {
+                                Logger.Error($"[UpdatePlugins] Error replacing plugin file {Path.GetFileName(f)}: {ex.Message}");
+                                try { if (File.Exists(tempFilePath)) File.Delete(tempFilePath); } catch { }
+                                hadError = true;
                                 continue;
                             }
                         }
-                        else
-                        {
-                            match = candidates[0];
-                        }
-
-                        string remoteVersion = "";
-                        if (match.TryGetProperty("latest_release_version", out var rvElem) && rvElem.ValueKind == JsonValueKind.String)
-                            remoteVersion = rvElem.GetString() ?? "";
-
-                        if (string.IsNullOrEmpty(remoteVersion))
-                        {
-                            Logger.Warn($"[UpdatePlugins] Remote candidate has no version for {Path.GetFileName(f)} -> skipping.");
-                            continue;
-                        }
-
-                        var cmpFinal = CompareVersionStrings(remoteVersion, localVersion);
-                        if (cmpFinal <= 0)
-                        {
-                            Logger.Info($"[UpdatePlugins] {Path.GetFileName(f)} is up-to-date (remote {remoteVersion} <= local {localVersion}).");
-                            continue;
-                        }
-
-                        Logger.Info($"[UpdatePlugins] Newer version found for {Path.GetFileName(f)}: remote={remoteVersion} local={localVersion}. Preparing download...");
-
-                        if (!match.TryGetProperty("download_url", out var downloadElem))
-                        {
-                            Logger.Error($"[UpdatePlugins] Download URL missing on selected match for {Path.GetFileName(f)}.");
-                            hadError = true;
-                            continue;
-                        }
-                        var downloadUrlFinal = downloadElem.GetString() ?? "";
-                        if (string.IsNullOrEmpty(downloadUrlFinal))
-                        {
-                            Logger.Error($"[UpdatePlugins] Download URL empty for {Path.GetFileName(f)}.");
-                            hadError = true;
-                            continue;
-                        }
-
-                        ThrottleIfNeeded(requestsPerMinute);
-
-                        var tempFileName = Guid.NewGuid().ToString() + ".temp";
-                        var tempFilePath = Path.Combine(pluginsFolder, tempFileName);
-                        Logger.Info($"[UpdatePlugins] Downloading update to temp file {tempFileName} from {downloadUrlFinal}");
-
-                        try
-                        {
-                            using var resp = http.GetAsync(downloadUrlFinal).GetAwaiter().GetResult();
-                            resp.EnsureSuccessStatusCode();
-                            using var fs = new FileStream(tempFilePath, FileMode.Create, FileAccess.Write, FileShare.None);
-                            resp.Content.CopyToAsync(fs).GetAwaiter().GetResult();
-                        }
                         catch (Exception ex)
                         {
-                            Logger.Error($"[UpdatePlugins] Download failed for {Path.GetFileName(f)}: {ex.Message}");
-                            try { if (File.Exists(tempFilePath)) File.Delete(tempFilePath); } catch { }
+                            Logger.Error($"[UpdatePlugins] Unexpected exception checking {Path.GetFileName(f)}: {ex.Message}");
                             hadError = true;
                             continue;
                         }
-
-                        var fi = new FileInfo(tempFilePath);
-                        if (!fi.Exists || fi.Length == 0)
-                        {
-                            Logger.Error($"[UpdatePlugins] Temp download missing or zero-length for {Path.GetFileName(f)}.");
-                            try { if (File.Exists(tempFilePath)) File.Delete(tempFilePath); } catch { }
-                            hadError = true;
-                            continue;
-                        }
-
-                        var finalPath = Path.Combine(pluginsFolder, Path.GetFileName(f));
-                        try
-                        {
-                            if (File.Exists(finalPath))
-                            {
-                                Logger.Info($"[UpdatePlugins] Removing existing plugin file before replace: {finalPath}");
-                                File.Delete(finalPath);
-                            }
-                            File.Move(tempFilePath, finalPath);
-                            Logger.Info($"[UpdatePlugins] Plugin {Path.GetFileName(f)} updated successfully to {remoteVersion}");
-                            RunState.UpdatedPlugins.Add(Path.GetFileName(finalPath));
-                        }
-                        catch (Exception ex)
-                        {
-                            Logger.Error($"[UpdatePlugins] Error replacing plugin file {Path.GetFileName(f)}: {ex.Message}");
-                            try { if (File.Exists(tempFilePath)) File.Delete(tempFilePath); } catch { }
-                            hadError = true;
-                            continue;
-                        }
-                    }
-                    catch (Exception ex)
-                    {
-                        Logger.Error($"[UpdatePlugins] Unexpected exception checking {Path.GetFileName(f)}: {ex.Message}");
-                        hadError = true;
-                        continue;
                     }
                 }
 
@@ -2058,7 +2742,11 @@ namespace FeedMeUpdates
             }
         }
 
-        /// <summary>Resolves the systemctl path on Linux systems.</summary>
+    #endregion
+
+    #region Misc helpers (systemctl resolution, throttling, parsing)
+
+        // Resolve systemctl path on Linux.
         private static string ResolveSystemctlPath()
         {
             try
@@ -2104,7 +2792,7 @@ namespace FeedMeUpdates
             return "systemctl";
         }
 
-        /// <summary>Applies simple rate limiting for plugin HTTP requests.</summary>
+        // Simple rate limiting for plugin HTTP requests.
         private static void ThrottleIfNeeded(int RequestsPerMinute)
         {
             while (true)
@@ -2121,7 +2809,7 @@ namespace FeedMeUpdates
 
         private record PluginInfo(string Title, string Author, string Version);
 
-        /// <summary>Parses the [Info(...)] attribute from a plugin file.</summary>
+        // Parse [Info("Title","Author","Version")] attribute from plugin file.
         private static PluginInfo? ParseInfoAttribute(string file)
         {
             try
@@ -2145,7 +2833,7 @@ namespace FeedMeUpdates
             return null;
         }
 
-        /// <summary>Extracts the first class name from a .cs plugin file.</summary>
+        // Extract a class name from a C# file for plugin matching.
         private static string GetClassNameFromCs(string file)
         {
             try
@@ -2159,14 +2847,14 @@ namespace FeedMeUpdates
             return Path.GetFileNameWithoutExtension(file);
         }
 
-        /// <summary>Gets file name portion from a download URL.</summary>
+        // Get filename from a download URL.
         private static string GetFileNameFromUrl(string url)
         {
             if (string.IsNullOrEmpty(url)) return "";
             try { var u = new Uri(url); return Path.GetFileName(u.AbsolutePath); } catch { var parts = url.Split('/'); return parts.LastOrDefault() ?? ""; }
         }
 
-        /// <summary>Compares version strings using Version parsing with fallbacks.</summary>
+        // Compare version strings using Version parsing with fallbacks.
         private static int CompareVersionStrings(string? a, string? b)
         {
             try
@@ -2182,7 +2870,7 @@ namespace FeedMeUpdates
             catch { return 0; }
         }
 
-        /// <summary>Parses loose version string formats into Version if possible.</summary>
+        // Parse flexible version strings into Version instances.
         private static Version? ParseVersion(string? s)
         {
             if (string.IsNullOrEmpty(s)) return null;
@@ -2212,7 +2900,11 @@ namespace FeedMeUpdates
             return null;
         }
 
-        /// <summary>Determines if a path is under any excluded root path.</summary>
+    #endregion
+
+    #region File and directory helpers
+
+        // Determine if path is under any root in provided set.
         private static bool IsUnderAny(string path, HashSet<string> roots)
         {
             var pNorm = Path.GetFullPath(path).TrimEnd(Path.DirectorySeparatorChar);
@@ -2225,7 +2917,7 @@ namespace FeedMeUpdates
             return false;
         }
 
-        /// <summary>Copies a directory tree overwriting files at destination.</summary>
+        // Copy directory and overwrite destination contents.
         private static void CopyDirectoryOverwrite(string src, string dst)
         {
             var srcRoot = Path.GetFullPath(src).TrimEnd(Path.DirectorySeparatorChar);
@@ -2250,7 +2942,7 @@ namespace FeedMeUpdates
             }
         }
 
-        /// <summary>Finds the origin directory inside extracted Oxide content.</summary>
+        // Find origin directory inside extracted archive content.
         private static string? FindExtractOrigin(string extractRoot)
         {
             try
@@ -2272,7 +2964,7 @@ namespace FeedMeUpdates
             }
         }
 
-        /// <summary>Checks if a tmux session with given name exists.</summary>
+        // Check if tmux session exists.
         private static bool TmuxSessionExists(string sessionName, int timeoutMs = 2000)
         {
             if (string.IsNullOrWhiteSpace(sessionName)) return false;
@@ -2308,7 +3000,7 @@ namespace FeedMeUpdates
             }
         }
 
-        /// <summary>Detects availability of gnome-terminal and tmux on Linux.</summary>
+        // Detect availability of gnome-terminal and tmux on Linux.
         private static bool[] DetectGnomeAndTmux()
         {
             if (!RuntimeInformation.IsOSPlatform(OSPlatform.Linux))
@@ -2345,7 +3037,7 @@ namespace FeedMeUpdates
             return new bool[] { gnome, tmux };
         }
 
-        /// <summary>Removes the temporary backup directory if it exists.</summary>
+        // Remove the temporary backup directory if present.
         private static void CleanTempBackup(string serverDir)
         {
             try
@@ -2383,7 +3075,11 @@ namespace FeedMeUpdates
             }
         }
 
-        /// <summary>Starts or restarts the Rust service using platform-specific commands.</summary>
+    #endregion
+
+    #region Service restart and updater result creation
+
+        // Restart or start Rust service using platform-specific commands.
         private static bool RestartRustService(string servName)
         {
             if (string.IsNullOrWhiteSpace(servName))
@@ -2500,44 +3196,66 @@ namespace FeedMeUpdates
             }
         }
 
-        /// <summary>Creates failure updateresult.json and starts script or service accordingly.</summary>
+        // Create updateresult.json with failure details and start server/script/service.
         private static void CreateUpdateresultAndStartScript(string server_dir, string update_id, string failReason, string start_script)
         {
             try
             {
                 var resultPath = Path.Combine(server_dir, "updateresult.json");
-                if (RunState.UpdatePluginsFlag == "yes" && RunState.UpdatedPlugins != null && RunState.UpdatedPlugins.Count > 0)
+                if (!RunState.IsForce && update_id == "wipe")
                 {
                     var payload = new Dictionary<string, object?>
                     {
                         ["result"] = "failed",
                         ["fail_reason"] = failReason,
-                        ["updated_plugins"] = RunState.UpdatedPlugins,
-                        ["backup_cycle"] = false,
-                        ["server_restored"] = false,
                         ["timestamp"] = DateTime.UtcNow.ToString("yyyy-MM-ddTHH:mm:ssZ"),
-                        ["update_id"] = update_id
+                        ["update_id"] = update_id,
+                        ["wiped"] = "no",
+                        ["wipe_info"] = ""
                     };
-
                     var json = JsonSerializer.Serialize(payload, new JsonSerializerOptions { WriteIndented = true });
                     File.WriteAllText(resultPath, json);
                     Logger.Info($"Created {resultPath} with fail_reason='{failReason}'");
                 }
                 else
                 {
-                    var payload = new Dictionary<string, object?>
+                    if (RunState.UpdatePluginsFlag == "yes" && RunState.UpdatedPlugins != null && RunState.UpdatedPlugins.Count > 0)
                     {
-                        ["result"] = "failed",
-                        ["fail_reason"] = failReason,
-                        ["backup_cycle"] = false,
-                        ["server_restored"] = false,
-                        ["timestamp"] = DateTime.UtcNow.ToString("yyyy-MM-ddTHH:mm:ssZ"),
-                        ["update_id"] = update_id
-                    };
+                        var payload = new Dictionary<string, object?>
+                        {
+                            ["result"] = "failed",
+                            ["fail_reason"] = failReason,
+                            ["updated_plugins"] = RunState.UpdatedPlugins,
+                            ["backup_cycle"] = false,
+                            ["server_restored"] = false,
+                            ["timestamp"] = DateTime.UtcNow.ToString("yyyy-MM-ddTHH:mm:ssZ"),
+                            ["update_id"] = update_id,
+                            ["wiped"] = "no",
+                            ["wipe_info"] = ""
+                        };
 
-                    var json = JsonSerializer.Serialize(payload, new JsonSerializerOptions { WriteIndented = true });
-                    File.WriteAllText(resultPath, json);
-                    Logger.Info($"Created {resultPath} with fail_reason='{failReason}'");
+                        var json = JsonSerializer.Serialize(payload, new JsonSerializerOptions { WriteIndented = true });
+                        File.WriteAllText(resultPath, json);
+                        Logger.Info($"Created {resultPath} with fail_reason='{failReason}'");
+                    }
+                    else
+                    {
+                        var payload = new Dictionary<string, object?>
+                        {
+                            ["result"] = "failed",
+                            ["fail_reason"] = failReason,
+                            ["backup_cycle"] = false,
+                            ["server_restored"] = false,
+                            ["timestamp"] = DateTime.UtcNow.ToString("yyyy-MM-ddTHH:mm:ssZ"),
+                            ["update_id"] = update_id,
+                            ["wiped"] = "no",
+                            ["wipe_info"] = ""
+                        };
+
+                        var json = JsonSerializer.Serialize(payload, new JsonSerializerOptions { WriteIndented = true });
+                        File.WriteAllText(resultPath, json);
+                        Logger.Info($"Created {resultPath} with fail_reason='{failReason}'");
+                    }
                 }
 
             }
@@ -2586,5 +3304,558 @@ namespace FeedMeUpdates
                 }
             }
         }
+
+    #endregion
+
+    #region Wipe cycle and configuration editing
+
+        // Perform force wipe operations: delete plugin data, BPs, player data, maps and update server.cfg keys.
+        private static string WipeCycle(out string wipingInfo)
+        {
+            string WipeResult = "no";
+            wipingInfo = "";
+            string pluginDir = "";
+            string cfgDir = "";
+            string sDataDir = "";
+            string sp = "";
+            if (string.IsNullOrEmpty(RunState.ServerIdentity))
+                RunState.ServerIdentity = "my_server_identity";
+
+            if (RuntimeInformation.IsOSPlatform(OSPlatform.Windows))
+            {
+                pluginDir = RunState.ServerDir + "\\oxide\\data";
+                sDataDir = RunState.ServerDir + "\\server\\" + RunState.ServerIdentity;
+                cfgDir = RunState.ServerDir + "\\server\\" + RunState.ServerIdentity + "\\cfg";
+                sp = "\\";
+            }
+            if (RuntimeInformation.IsOSPlatform(OSPlatform.Linux))
+            {
+                pluginDir = RunState.ServerDir + "/oxide/data";
+                sDataDir = RunState.ServerDir + "/server/" + RunState.ServerIdentity;
+                cfgDir = RunState.ServerDir + "/server/" + RunState.ServerIdentity + "/cfg";
+                sp = "/";
+            }
+            string[] localFiles;
+            if (RunState.PdataFilesToDelete.Count > 0)
+            {
+                if (!Directory.Exists(pluginDir))
+                {
+                    Logger.Warn("WIPE-CYCLE: CAUTION! Plugin data directory  not found.");
+                    wipingInfo += "[" + "Plugin data directory  not found." + "]";
+                }
+                else
+                {
+                    localFiles = Directory.GetFiles(pluginDir);
+                    foreach (string filename in RunState.PdataFilesToDelete)
+                    {
+                        bool _found = false;
+                        foreach (string file in localFiles)
+                        {
+                            if (file == pluginDir + sp + filename)
+                            {
+                                _found = true;
+                                File.Delete(file);
+                                Logger.Info("WIPE-CYCLE: Plugin Datafile " + filename + " deleted.");
+                                break;
+                            }
+                        }
+                        if (!_found)
+                        {
+                            Logger.Warn("WIPE-CYCLE: CAUTION! Plugin Datafile " + filename + " not found.");
+                            wipingInfo += "[" + "Plugin Datafile " + filename + " not found." + "]";
+                        }
+                    }
+                }
+            }
+            if (!RunState.NextWipeKeepBps)
+            {
+                Logger.Info("WIPE-CYCLE: Removing BP database.");
+                localFiles = Directory.GetFiles(sDataDir);
+                bool _found = false;
+                foreach (string file in localFiles)
+                {
+                    if (file.Contains(".blueprints"))
+                    {
+                        _found = true;
+                        File.Delete(file);
+                        Logger.Info("WIPE-CYCLE: Players blueprint file " + file.Split(sp, StringSplitOptions.RemoveEmptyEntries)[file.Split(sp, StringSplitOptions.RemoveEmptyEntries).Length - 1] + " deleted.");
+                    }
+                }
+                if (!_found)
+                {
+                    Logger.Warn("WIPE-CYCLE: CAUTION! No players blueprint db found. Please check manually.");
+                    wipingInfo += "[" + "No players blueprint db found. Please check manually." + "]";
+                }
+            }
+            if (RunState.NextWipeDeletePlayerData)
+            {
+                Logger.Info("WIPE-CYCLE: Removing players data.");
+                localFiles = Directory.GetFiles(sDataDir);
+                bool _found = false;
+                foreach (string file in localFiles)
+                {
+                    if (file.Contains(".deaths") || file.Contains(".identities") || file.Contains(".states") || file.Contains(".tokens") || file.Contains("relationship") || file.Contains(".files"))
+                    {
+                        _found = true;
+                        File.Delete(file);
+                        Logger.Info("WIPE-CYCLE: Player data file " + file.Split(sp, StringSplitOptions.RemoveEmptyEntries)[file.Split(sp, StringSplitOptions.RemoveEmptyEntries).Length - 1] + " deleted.");
+                    }
+                }
+                if (!_found)
+                {
+                    Logger.Warn("WIPE-CYCLE: CAUTION! No player data file found. Please check manually.");
+                    wipingInfo += "[" + "No player data file found. Please check manually." + "]";
+                }
+            }
+            Logger.Info("WIPE-CYCLE: Removing map data.");
+            localFiles = Directory.GetFiles(sDataDir);
+            bool found = false;
+            foreach (string file in localFiles)
+            {
+                if (file.Contains(".map") || file.Contains(".sav") || file.Contains(".dat"))
+                {
+                    found = true;
+                    File.Delete(file);
+                    Logger.Info("WIPE-CYCLE: Map file " + file.Split(sp, StringSplitOptions.RemoveEmptyEntries)[file.Split(sp, StringSplitOptions.RemoveEmptyEntries).Length - 1] + " deleted.");
+                }
+            }
+            if (!found)
+            {
+                Logger.Warn("WIPE-CYCLE: CAUTION! No map file found. Please check manually.");
+                wipingInfo += "[" + "No map file found. Please check manually." + "]";
+            }
+            string cfgpath = cfgDir + sp + "server.cfg";
+            string _errorText = "";
+            bool kvchanged = false;
+            if (!string.IsNullOrEmpty(RunState.ServerName))
+            {
+                kvchanged = TryUpdateConfigValue(cfgpath, "server.hostname", RunState.ServerName, true, out _errorText);
+                if (kvchanged)
+                {
+                    Logger.Info("WIPE-CYCLE: Server hostname updated");
+                }
+                else
+                {
+                    if (!string.IsNullOrEmpty(_errorText))
+                    {
+                        Logger.Warn("WIPE-CYCLE: CAUTION! Server hostname not updated (error: " + _errorText + ")");
+                        wipingInfo += "[" + "Server hostname not updated (error: " + _errorText + ")" + "]";
+                    }
+                }
+            }
+            kvchanged = false;
+            _errorText = "";
+            if (!string.IsNullOrEmpty(RunState.ServerDescription))
+            {
+                kvchanged = TryUpdateConfigValue(cfgpath, "server.description", RunState.ServerDescription, true, out _errorText);
+                if (kvchanged)
+                {
+                    Logger.Info("WIPE-CYCLE: Server description updated");
+                }
+                else
+                {
+                    if (!string.IsNullOrEmpty(_errorText))
+                    {
+                        Logger.Warn("WIPE-CYCLE: CAUTION! Server description not updated (error: " + _errorText + ")");
+                        wipingInfo += "[" + "Server description not updated (error: " + _errorText + ")" + "]";
+                    }
+                }
+            }
+            kvchanged = false;
+            _errorText = "";
+            if (!string.IsNullOrEmpty(RunState.NextWipeUrl))
+            {
+                kvchanged = TryRemoveConfigValue(cfgpath, "server.level", out _errorText);
+                if (kvchanged)
+                {
+                    Logger.Info("WIPE-CYCLE: server.level removed");
+                    kvchanged = false;
+                }
+                else
+                {
+                    if (!string.IsNullOrEmpty(_errorText))
+                    {
+                        Logger.Warn("WIPE-CYCLE: CAUTION! Error while removing server.level from cfg (error: " + _errorText + ")");
+                        wipingInfo += "[" + "Error while removing server.level from cfg (error: " + _errorText + ")" + "]";
+                        _errorText = "";
+                    }
+                    else
+                        Logger.Info("WIPE-CYCLE: server.level was already unset");
+                }
+                kvchanged = TryRemoveConfigValue(cfgpath, "server.worldsize", out _errorText);
+                if (kvchanged)
+                {
+                    Logger.Info("WIPE-CYCLE: server.worldsize removed");
+                    kvchanged = false;
+                }
+                else
+                {
+                    if (!string.IsNullOrEmpty(_errorText))
+                    {
+                        Logger.Warn("WIPE-CYCLE: CAUTION! Error while removing server.worldsize from cfg (error: " + _errorText + ")");
+                        wipingInfo += "[" + "Error while removing server.worldsize from cfg (error: " + _errorText + ")" + "]";
+                        _errorText = "";
+                    }
+                    else
+                        Logger.Info("WIPE-CYCLE: server.worldsize was already unset");
+                }
+                kvchanged = TryRemoveConfigValue(cfgpath, "server.seed", out _errorText);
+                if (kvchanged)
+                {
+                    Logger.Info("WIPE-CYCLE: server.seed removed");
+                    kvchanged = false;
+                }
+                else
+                {
+                    if (!string.IsNullOrEmpty(_errorText))
+                    {
+                        Logger.Warn("WIPE-CYCLE: CAUTION! Error while removing server.seed from cfg (error: " + _errorText + ")");
+                        wipingInfo += "[" + "Error while removing server.seed from cfg (error: " + _errorText + ")" + "]";
+                        _errorText = "";
+                    }
+                    else
+                        Logger.Info("WIPE-CYCLE: server.seed was already unset");
+                }
+                if (!string.IsNullOrEmpty(RunState.NextWipeUrl))
+                {
+                    kvchanged = TryUpdateConfigValue(cfgpath, "server.levelurl", RunState.NextWipeUrl, true, out _errorText);
+                    if (kvchanged)
+                    {
+                        Logger.Info("WIPE-CYCLE: servel.levelurl updated");
+                    }
+                    else
+                    {
+                        if (!string.IsNullOrEmpty(_errorText))
+                        {
+                            Logger.Warn("WIPE-CYCLE: CAUTION! server.levelurl not updated (error: " + _errorText + ")");
+                            wipingInfo += "[" + "server.levelurl not updated (error: " + _errorText + ")" + "]";
+                        }
+                    }
+                }
+            }
+            else
+            {
+                kvchanged = false;
+                _errorText = "";
+                kvchanged = TryRemoveConfigValue(cfgpath, "server.levelurl", out _errorText);
+                if (kvchanged)
+                {
+                    Logger.Info("WIPE-CYCLE: server.levelurl removed");
+                    kvchanged = false;
+                }
+                else
+                {
+                    if (!string.IsNullOrEmpty(_errorText))
+                    {
+                        Logger.Warn("WIPE-CYCLE: CAUTION! Error while removing server.levelurl from cfg (error: " + _errorText + ")");
+                        wipingInfo += "[" + "Error while removing server.levelurl from cfg (error: " + _errorText + ")" + "]";
+                        _errorText = "";
+                    }
+                    else
+                        Logger.Info("WIPE-CYCLE: server.levelurl was already unset");
+                }
+                if (!string.IsNullOrEmpty(RunState.NextWipeLevel))
+                {
+                    kvchanged = TryUpdateConfigValue(cfgpath, "server.level", RunState.NextWipeLevel, true, out _errorText);
+                    if (kvchanged)
+                    {
+                        Logger.Info("WIPE-CYCLE: server.level updated");
+                        kvchanged = false;
+                    }
+                    else
+                    {
+                        if (!string.IsNullOrEmpty(_errorText))
+                        {
+                            Logger.Warn("WIPE-CYCLE: CAUTION! server.level not updated (error: " + _errorText + ")");
+                            wipingInfo += "[" + "server.level not updated (error: " + _errorText + ")" + "]";
+                            _errorText = "";
+                        }
+                    }
+                }
+                if (!string.IsNullOrEmpty(RunState.NextWipeSeed))
+                {
+                    kvchanged = TryUpdateConfigValue(cfgpath, "server.seed", RunState.NextWipeSeed, true, out _errorText);
+                    if (kvchanged)
+                    {
+                        Logger.Info("WIPE-CYCLE: server.seed updated");
+                        kvchanged = false;
+                    }
+                    else
+                    {
+                        if (!string.IsNullOrEmpty(_errorText))
+                        {
+                            Logger.Warn("WIPE-CYCLE: CAUTION! server.seed not updated (error: " + _errorText + ")");
+                            wipingInfo += "[" + "server.seed not updated (error: " + _errorText + ")" + "]";
+                            _errorText = "";
+                        }
+                    }
+                }
+                if (!string.IsNullOrEmpty(RunState.NextWipeMapsize))
+                {
+                    kvchanged = TryUpdateConfigValue(cfgpath, "server.worldsize", RunState.NextWipeMapsize, true, out _errorText);
+                    if (kvchanged)
+                    {
+                        Logger.Info("WIPE-CYCLE: server.worldsize updated");
+                        kvchanged = false;
+                    }
+                    else
+                    {
+                        if (!string.IsNullOrEmpty(_errorText))
+                        {
+                            Logger.Warn("WIPE-CYCLE: CAUTION! server.worldsize not updated (error: " + _errorText + ")");
+                            wipingInfo += "[" + "server.worldsize not updated (error: " + _errorText + ")" + "]";
+                            _errorText = "";
+                        }
+                    }
+                }
+            }
+            Logger.Info("WIPE-CYCLE: wiping task done");
+            WipeResult = "yes";
+            return WipeResult;
+        }
+
+        // Decode plugin datafile list argument, supporting base64 URL-safe encoding or raw JSON.
+        private static List<string> DecodeFileListArgToList(string? arg)
+        {
+            var result = new List<string>();
+            if (string.IsNullOrWhiteSpace(arg))
+                return result;
+
+            string? json = null;
+
+            try
+            {
+                string b64 = arg.Replace('-', '+').Replace('_', '/');
+                switch (b64.Length % 4)
+                {
+                    case 2: b64 += "=="; break;
+                    case 3: b64 += "="; break;
+                }
+                var bytes = Convert.FromBase64String(b64);
+                json = Encoding.UTF8.GetString(bytes);
+            }
+            catch
+            {
+                json = arg;
+            }
+
+            if (string.IsNullOrWhiteSpace(json))
+                return result;
+
+            try
+            {
+                using var doc = JsonDocument.Parse(json);
+                if (doc.RootElement.ValueKind != JsonValueKind.Array)
+                    return result;
+
+                foreach (var el in doc.RootElement.EnumerateArray())
+                {
+                    if (el.ValueKind == JsonValueKind.String)
+                    {
+                        var s = el.GetString();
+                        if (!string.IsNullOrEmpty(s))
+                            result.Add(s);
+                    }
+                }
+            }
+            catch
+            {
+                return new List<string>();
+            }
+
+            return result;
+        }
+
+        // Update or append a key/value pair inside server.cfg with optional quoting behavior.
+        public static bool TryUpdateConfigValue(string path, string key, string value, bool forceWrite, out string error)
+        {
+            error = string.Empty;
+
+            if (string.IsNullOrWhiteSpace(path))
+            {
+                error = "'path' param is null or empty.";
+                return false;
+            }
+            if (string.IsNullOrWhiteSpace(key))
+            {
+                error = "'key' param is null or empty.";
+                return false;
+            }
+
+            try
+            {
+                string content = File.Exists(path) ? File.ReadAllText(path) : "";
+                var parts = Regex.Split(content, "(\r\n|\n)", RegexOptions.Compiled);
+
+                string normalized = NormalizeControlChars(value);
+
+                string BuildValue(string existingKey, string norm)
+                {
+                    if (string.Equals(existingKey, "server.description", StringComparison.OrdinalIgnoreCase))
+                    {
+                        norm = norm.Replace("\"", "").Replace("'", "");
+                        return (norm.IndexOf(' ') >= 0) ? "\"" + norm + "\"" : norm;
+                    }
+                    if (NeedsQuoting(norm))
+                        return "\"" + norm.Replace("\"", "") + "\"";
+                    return norm;
+                }
+
+                var lineRegex = new Regex(@"^\s*(?<key>[^\s#;=]+)\s+(?<value>.*)$", RegexOptions.Compiled);
+                bool updated = false;
+
+                for (int i = 0; i < parts.Length; i += 2)
+                {
+                    var originalLine = parts[i];
+                    if (string.IsNullOrEmpty(originalLine)) continue;
+                    var trimmed = originalLine.Trim();
+                    if (trimmed.Length == 0 || trimmed.StartsWith("#") || trimmed.StartsWith(";"))
+                        continue;
+
+                    var match = lineRegex.Match(originalLine);
+                    if (!match.Success) continue;
+
+                    var existingKey = match.Groups["key"].Value;
+                    if (!string.Equals(existingKey, key, StringComparison.Ordinal))
+                        continue;
+
+                    var newValueText = BuildValue(existingKey, normalized);
+                    parts[i] = $"{existingKey} {newValueText}";
+                    updated = true;
+                    break;
+                }
+
+                if (updated)
+                {
+                    var sb = new StringBuilder();
+                    for (int i = 0; i < parts.Length; i++)
+                        sb.Append(parts[i]);
+                    WriteAllTextNoBomAtomic(path, sb.ToString());
+                    return true;
+                }
+
+                if (forceWrite)
+                {
+                    string sep = content.Contains("\r\n") ? "\r\n" : "\n";
+                    var newLine = $"{key} {BuildValue(key, normalized)}";
+                    string newContent = string.IsNullOrEmpty(content)
+                        ? newLine + sep
+                        : (content.EndsWith(sep) ? content + newLine + sep : content + sep + newLine + sep);
+                    WriteAllTextNoBomAtomic(path, newContent);
+                    return true;
+                }
+
+                error = File.Exists(path) ? "Chiave non trovata e forceWrite=false" : $"File non trovato: {path}";
+                return false;
+            }
+            catch (Exception ex)
+            {
+                error = ex.Message;
+                return false;
+            }
+        }
+
+        // Remove a key/value line from server.cfg if present.
+        public static bool TryRemoveConfigValue(string path, string key, out string error)
+        {
+            error = string.Empty;
+
+            if (string.IsNullOrWhiteSpace(path))
+            {
+                error = "'path' param is null or empty.";
+                return false;
+            }
+            if (string.IsNullOrWhiteSpace(key))
+            {
+                error = "'key' param is null or empty.";
+                return false;
+            }
+
+            try
+            {
+                if (!File.Exists(path))
+                {
+                    error = $"File non trovato: {path}";
+                    return false;
+                }
+
+                string content = File.ReadAllText(path);
+                var parts = Regex.Split(content, "(\r\n|\n)", RegexOptions.Compiled);
+                var lineRegex = new Regex(@"^\s*(?<key>[^\s#;=]+)\s+(?<value>.*)$", RegexOptions.Compiled);
+
+                bool removed = false;
+
+                var sb = new StringBuilder();
+                for (int i = 0; i < parts.Length; i += 2)
+                {
+                    var line = parts[i];
+                    var sep = (i + 1 < parts.Length) ? parts[i + 1] : "";
+
+                    if (!string.IsNullOrEmpty(line))
+                    {
+                        var match = lineRegex.Match(line);
+                        if (match.Success)
+                        {
+                            var k = match.Groups["key"].Value;
+                            if (string.Equals(k, key, StringComparison.Ordinal))
+                            {
+                                removed = true;
+                                continue;
+                            }
+                        }
+                    }
+
+                    sb.Append(line);
+                    sb.Append(sep);
+                }
+
+                if (removed)
+                {
+                    WriteAllTextNoBomAtomic(path, sb.ToString());
+                    return true;
+                }
+
+                return false;
+            }
+            catch (Exception ex)
+            {
+                error = ex.Message;
+                return false;
+            }
+        }
+
+        // Normalize control characters in configuration values.
+        private static string NormalizeControlChars(string value)
+        {
+            if (string.IsNullOrEmpty(value)) return string.Empty;
+            var cleaned = value
+                .Replace('\r', ' ')
+                .Replace('\n', ' ')
+                .Replace('\t', ' ');
+            while (cleaned.Contains("  "))
+                cleaned = cleaned.Replace("  ", " ");
+            return cleaned.Trim();
+        }
+
+        // Atomic write without BOM.
+        private static void WriteAllTextNoBomAtomic(string path, string content)
+        {
+            var tmp = path + ".tmp_" + Guid.NewGuid().ToString("N");
+            var encoding = new System.Text.UTF8Encoding(encoderShouldEmitUTF8Identifier: false);
+            File.WriteAllText(tmp, content, encoding);
+            if (File.Exists(path)) File.Delete(path);
+            File.Move(tmp, path);
+        }
+
+        // Determine if a value needs quoting.
+        private static bool NeedsQuoting(string v)
+        {
+            if (string.IsNullOrEmpty(v)) return true;
+            foreach (var c in v)
+                if (char.IsWhiteSpace(c)) return true;
+            return false;
+        }
+
+    #endregion
     }
 }
