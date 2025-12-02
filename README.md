@@ -327,9 +327,8 @@ All actions are logged to `updater.log`. If anything fails during promotion, the
 ## 12. Service / Script Integration (with commands)
 
 FMU can start your server either via:
-- Script (Windows `.bat`/PowerShell or Linux shell script)
-- Service (Windows SC/NSSM or Linux systemd)
-Please note that service support is only available for service running directly RustDedicated (if your service controls a script that controls RustDedicated it won't work).
+- Script (Windows `.bat`/PowerShell or Linux shell script).
+- Service (Windows SC/NSSM or Linux systemd). _Please note that service support is only available for service running directly RustDedicated (if your service controls a script that controls RustDedicated it won't work)_.
 
 Below are ready‑to‑use command sets for both platforms.
 
