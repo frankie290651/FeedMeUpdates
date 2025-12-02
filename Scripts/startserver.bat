@@ -13,4 +13,4 @@ if exist "updating.lock" goto end
 goto loop
 
 :end
-exit /b
+exit
