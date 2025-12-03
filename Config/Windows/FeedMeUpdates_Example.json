@@ -34,6 +34,7 @@
   "NextWipeRandomSeed": true,
   "NextWipeMapsize": "",
   "NextWipeKeepBps": false,
+  "NextWipeResetRustPlus": false,
   "NextWipeDeletePlayerData": true,
   "NextWipeDeletePluginDatafiles": "",
   "UpdaterMarkerFileName": "updateresult.json",
