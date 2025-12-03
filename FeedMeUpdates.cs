@@ -15,7 +15,7 @@ using System.Security.Cryptography;
 
 namespace Oxide.Plugins
 {
-    [Info("FeedMeUpdates", "frankie290651", "1.6.4")]
+    [Info("FeedMeUpdates", "frankie290651", "1.6.5")]
     [Description("Highly configurable plugin for Oxide framework to orchestrate Server/Oxide/Plugins updates.")]
     public class FeedMeUpdates : CovalencePlugin
     {
@@ -63,6 +63,7 @@ namespace Oxide.Plugins
             public bool NextWipeRandomSeed { get; set; } = false;
             public string NextWipeMapsize { get; set; } = "";
             public bool NextWipeKeepBps { get; set; } = true;
+            public bool NextWipeResetRustPlus { get; set; } = false;
             public bool NextWipeDeletePlayerData { get; set; } = false;
             public string NextWipeDeletePluginDatafiles { get; set; } = "";
 
@@ -734,6 +735,7 @@ namespace Oxide.Plugins
             AddCovalenceCommand("feedme.testrun", nameof(Cmd_TestRun));
             AddCovalenceCommand("feedme.status", nameof(Cmd_Status));
             AddCovalenceCommand("feedme.version", nameof(Cmd_Version));
+            AddCovalenceCommand("feedme.set", nameof(Cmd_SetConfig));
 
             try
             {
@@ -835,6 +837,7 @@ namespace Oxide.Plugins
                     configData.NextWipeSeed = "";
                 }
             }
+
 
             if (configData.MaxAttempts != 0 && trynumber >= configData.MaxAttempts) enablePlugin = false;
             else enablePlugin = true;
@@ -2157,9 +2160,402 @@ namespace Oxide.Plugins
             });
         }
 
+        void Cmd_SetConfig(IPlayer player, string command, string[] args)
+        {
+            if (!HasPermissionOrConsole(player)) return;
+
+            if (args == null || args.Length < 2)
+            {
+                player?.Message("Usage: feedme.set <option> <value>");
+                player?.Message("Example: feedme.set startupscan true");
+                return;
+            }
+
+            var key = args[0].ToLowerInvariant();
+            var value = string.Join(" ", args.Skip(1)); // allows values with spaces
+
+            bool boolVal;
+            int intVal;
+            string changed = null;
+
+            try
+            {
+                switch (key)
+                {
+                    // --- GENERAL / PATHS / SERVICE ---
+
+                    case "serverdirectory":
+                        configData.ServerDirectory = value;
+                        changed = $"ServerDirectory = {value}";
+                        break;
+
+                    case "steamcmdpath":
+                        configData.SteamCmdPath = value;
+                        changed = $"SteamCmdPath = {value}";
+                        break;
+
+                    case "updaterexecutablepath":
+                        configData.UpdaterExecutablePath = value;
+                        changed = $"UpdaterExecutablePath = {value}";
+                        break;
+
+                    case "showupdaterconsole":
+                        if (!TryParseBoolFlexible(value, out boolVal)) goto invalid_bool;
+                        configData.ShowUpdaterConsole = boolVal;
+                        changed = $"ShowUpdaterConsole = {boolVal}";
+                        break;
+
+                    case "serverstartscript":
+                        configData.ServerStartScript = value;
+                        changed = $"ServerStartScript = {value}";
+                        break;
+
+                    case "runserverscripthidden":
+                        if (!TryParseBoolFlexible(value, out boolVal)) goto invalid_bool;
+                        configData.RunServerScriptHidden = boolVal;
+                        changed = $"RunServerScriptHidden = {boolVal}";
+                        break;
+
+                    case "servertmuxsession":
+                        configData.ServerTmuxSession = value;
+                        changed = $"ServerTmuxSession = {value}";
+                        break;
+
+                    case "rustonservice":
+                        if (!TryParseBoolFlexible(value, out boolVal)) goto invalid_bool;
+                        configData.RustOnService = boolVal;
+                        changed = $"RustOnService = {boolVal}";
+                        break;
+
+                    case "servicename":
+                        configData.ServiceName = value;
+                        changed = $"ServiceName = {value}";
+                        break;
+
+                    case "servicetype":
+                        configData.ServiceType = value;
+                        changed = $"ServiceType = {value}";
+                        break;
+
+                    // --- TIMEOUTS & INTERVALS ---
+
+                    case "httptimeoutms":
+                        if (!int.TryParse(value, out intVal)) goto invalid_int;
+                        configData.HttpTimeoutMs = intVal;
+                        changed = $"HttpTimeoutMs = {intVal}";
+                        break;
+
+                    case "maxattempts":
+                        if (!int.TryParse(value, out intVal)) goto invalid_int;
+                        configData.MaxAttempts = intVal;
+                        changed = $"MaxAttempts = {intVal}";
+                        break;
+
+                    case "checkintervalminutes":
+                        if (!int.TryParse(value, out intVal)) goto invalid_int;
+                        configData.CheckIntervalMinutes = intVal;
+                        changed = $"CheckIntervalMinutes = {intVal}";
+                        break;
+
+                    case "countdownminutes":
+                        if (!int.TryParse(value, out intVal)) goto invalid_int;
+                        configData.CountdownMinutes = intVal;
+                        changed = $"CountdownMinutes = {intVal}";
+                        break;
+
+                    // --- UPDATE BEHAVIOR ---
+
+                    case "startupscan":
+                        if (!TryParseBoolFlexible(value, out boolVal)) goto invalid_bool;
+                        configData.StartupScan = boolVal;
+                        changed = $"StartupScan = {boolVal}";
+                        break;
+
+                    case "updateplugins":
+                        if (!TryParseBoolFlexible(value, out boolVal)) goto invalid_bool;
+                        configData.UpdatePlugins = boolVal;
+                        changed = $"UpdatePlugins = {boolVal}";
+                        break;
+
+                    case "onlyserverprotocolupdate":
+                    case "protocolonly":
+                        if (!TryParseBoolFlexible(value, out boolVal)) goto invalid_bool;
+                        configData.OnlyServerProtocolUpdate = boolVal;
+                        changed = $"OnlyServerProtocolUpdate = {boolVal}";
+                        break;
+
+                    case "usescheme":
+                        if (!TryParseBoolFlexible(value, out boolVal)) goto invalid_bool;
+                        configData.UseScheme = boolVal;
+                        changed = $"UseScheme = {boolVal}";
+                        break;
+
+                    case "schemefile":
+                        configData.SchemeFile = value;
+                        changed = $"SchemeFile = {value}";
+                        break;
+
+                    // --- DAILY RESTART ---
+
+                    case "dailyrestarttime":
+                        configData.DailyRestartTime = value;
+                        changed = $"DailyRestartTime = {value}";
+                        break;
+
+                    case "minutesbeforerestart":
+                        if (!int.TryParse(value, out intVal)) goto invalid_int;
+                        configData.MinutesBeforeRestart = intVal;
+                        changed = $"MinutesBeforeRestart = {intVal}";
+                        break;
+
+                    // --- DISCORD ---
+
+                    case "discordnotificationsenabled":
+                        if (!TryParseBoolFlexible(value, out boolVal)) goto invalid_bool;
+                        configData.DiscordNotificationsEnabled = boolVal;
+                        changed = $"DiscordNotificationsEnabled = {boolVal}";
+                        break;
+
+                    case "discordwebhookurl":
+                        configData.DiscordWebhookUrl = value;
+                        changed = $"DiscordWebhookUrl = {value}";
+                        break;
+
+                    // --- FORCE WIPE / CUSTOM WIPE ---
+
+                    case "beforeforcewiperange":
+                        if (!int.TryParse(value, out intVal)) goto invalid_int;
+                        configData.BeforeForceWipeRange = intVal;
+                        changed = $"BeforeForceWipeRange = {intVal}";
+                        break;
+
+                    case "serveridentity":
+                        configData.ServerIdentity = value;
+                        changed = $"ServerIdentity = {value}";
+                        break;
+
+                    // --- NEXT WIPE: SCHEDULE & MAP / BRANDING ---
+
+                    case "customwipeday":
+                        configData.CustomWipeDay = value;
+                        changed = $"CustomWipeDay = {value}";
+                        break;
+
+                    case "customwipetime":
+                        configData.CustomWipeTime = value;
+                        changed = $"CustomWipeTime = {value}";
+                        break;
+
+                    case "nextwipeservername":
+                        configData.NextWipeServerName = value;
+                        changed = $"NextWipeServerName = {value}";
+                        break;
+
+                    case "nextwipeserverdescription":
+                        configData.NextWipeServerDescription = value;
+                        changed = $"NextWipeServerDescription = {value}";
+                        break;
+
+                    case "nextwipemapurl":
+                        configData.NextWipeMapUrl = value;
+                        changed = $"NextWipeMapUrl = {value}";
+                        break;
+
+                    case "nextwipelevel":
+                        configData.NextWipeLevel = value;
+                        changed = $"NextWipeLevel = {value}";
+                        break;
+
+                    case "nextwipeseed":
+                        configData.NextWipeSeed = value;
+                        changed = $"NextWipeSeed = {value}";
+                        break;
+
+                    case "nextwiperandomseed":
+                    case "randomseed":
+                        if (!TryParseBoolFlexible(value, out boolVal)) goto invalid_bool;
+                        configData.NextWipeRandomSeed = boolVal;
+                        changed = $"NextWipeRandomSeed = {boolVal}";
+                        break;
+
+                    case "nextwipemapsize":
+                        configData.NextWipeMapsize = value;
+                        changed = $"NextWipeMapsize = {value}";
+                        break;
+
+                    case "nextwipekeepbps":
+                    case "keepbps":
+                        if (!TryParseBoolFlexible(value, out boolVal)) goto invalid_bool;
+                        configData.NextWipeKeepBps = boolVal;
+                        changed = $"NextWipeKeepBps = {boolVal}";
+                        break;
+
+                    case "nextwiperesetrustplus":
+                    case "resetrustplus":
+                        if (!TryParseBoolFlexible(value, out boolVal)) goto invalid_bool;
+                        configData.NextWipeResetRustPlus = boolVal;
+                        changed = $"NextWipeResetRustPlus = {boolVal}";
+                        break;
+
+                    case "nextwipedeleteplayerdata":
+                    case "deleteplayerdata":
+                        if (!TryParseBoolFlexible(value, out boolVal)) goto invalid_bool;
+                        configData.NextWipeDeletePlayerData = boolVal;
+                        changed = $"NextWipeDeletePlayerData = {boolVal}";
+                        break;
+
+                    case "nextwipedeleteplugindatafiles":
+                        configData.NextWipeDeletePluginDatafiles = value;
+                        changed = $"NextWipeDeletePluginDatafiles = {value}";
+                        break;
+
+                    // --- INTERNAL MARKERS ---
+
+                    case "updatermarkerfilename":
+                        configData.UpdaterMarkerFileName = value;
+                        changed = $"UpdaterMarkerFileName = {value}";
+                        break;
+
+                    case "updaterlockfilename":
+                        configData.UpdaterLockFileName = value;
+                        changed = $"UpdaterLockFileName = {value}";
+                        break;
+
+                    case "markerssubfolder":
+                        configData.MarkersSubfolder = value;
+                        changed = $"MarkersSubfolder = {value}";
+                        break;
+
+                    default:
+                        player?.Message($"Unknown config option: {key}");
+                        return;
+                }
+
+                Config.WriteObject(configData, true);
+                var who = player == null ? "Console" : player.Name;
+                Puts($"[Config] {who} changed: {changed}");
+                player?.Message($"FeedMeUpdates config updated: {changed}");
+                return;
+
+            invalid_bool:
+                player?.Message("Value must be a boolean (true/false, on/off, yes/no, 1/0).");
+                return;
+
+            invalid_int:
+                player?.Message("Value must be an integer.");
+                return;
+            }
+            catch (Exception ex)
+            {
+                player?.Message("Error while changing config: " + ex.Message);
+            }
+        }
+
+
         #endregion
 
         #region Utilities
+
+        private Dictionary<string, object> GetGuiConfigSnapshot()
+        {
+            var d = new Dictionary<string, object>(StringComparer.OrdinalIgnoreCase)
+            {
+                // GENERAL / PATHS / SERVICE
+                ["ServerDirectory"] = configData.ServerDirectory,
+                ["SteamCmdPath"] = configData.SteamCmdPath,
+                ["UpdaterExecutablePath"] = configData.UpdaterExecutablePath,
+                ["ShowUpdaterConsole"] = configData.ShowUpdaterConsole,
+                ["ServerStartScript"] = configData.ServerStartScript,
+                ["RunServerScriptHidden"] = configData.RunServerScriptHidden,
+                ["ServerTmuxSession"] = configData.ServerTmuxSession,
+                ["RustOnService"] = configData.RustOnService,
+                ["ServiceName"] = configData.ServiceName,
+                ["ServiceType"] = configData.ServiceType,
+
+                // TIMEOUTS / INTERVALS
+                ["HttpTimeoutMs"] = configData.HttpTimeoutMs,
+                ["MaxAttempts"] = configData.MaxAttempts,
+                ["CheckIntervalMinutes"] = configData.CheckIntervalMinutes,
+                ["CountdownMinutes"] = configData.CountdownMinutes,
+
+                // UPDATE BEHAVIOR
+                ["StartupScan"] = configData.StartupScan,
+                ["UpdatePlugins"] = configData.UpdatePlugins,
+                ["OnlyServerProtocolUpdate"] = configData.OnlyServerProtocolUpdate,
+                ["UseScheme"] = configData.UseScheme,
+                ["SchemeFile"] = configData.SchemeFile,
+
+                // DAILY RESTART
+                ["DailyRestartTime"] = configData.DailyRestartTime,
+                ["MinutesBeforeRestart"] = configData.MinutesBeforeRestart,
+
+                // DISCORD
+                ["DiscordNotificationsEnabled"] = configData.DiscordNotificationsEnabled,
+                ["DiscordWebhookUrl"] = configData.DiscordWebhookUrl,
+
+                // FORCE WIPE / CUSTOM WIPE
+                ["BeforeForceWipeRange"] = configData.BeforeForceWipeRange,
+
+                // NEXT WIPE: SCHEDULE & MAP / BRANDING
+                ["ServerIdentity"] = configData.ServerIdentity,
+                ["CustomWipeDay"] = configData.CustomWipeDay,
+                ["CustomWipeTime"] = configData.CustomWipeTime,
+                ["NextWipeServerName"] = configData.NextWipeServerName,
+                ["NextWipeServerDescription"] = configData.NextWipeServerDescription,
+                ["NextWipeMapUrl"] = configData.NextWipeMapUrl,
+                ["NextWipeLevel"] = configData.NextWipeLevel,
+                ["NextWipeSeed"] = configData.NextWipeSeed,
+                ["NextWipeRandomSeed"] = configData.NextWipeRandomSeed,
+                ["NextWipeMapsize"] = configData.NextWipeMapsize,
+                ["NextWipeKeepBps"] = configData.NextWipeKeepBps,
+                ["NextWipeResetRustPlus"] = configData.NextWipeResetRustPlus,
+                ["NextWipeDeletePlayerData"] = configData.NextWipeDeletePlayerData,
+                ["NextWipeDeletePluginDatafiles"] = configData.NextWipeDeletePluginDatafiles,
+
+                // MARKERS
+                ["UpdaterMarkerFileName"] = configData.UpdaterMarkerFileName,
+                ["UpdaterLockFileName"] = configData.UpdaterLockFileName,
+                ["MarkersSubfolder"] = configData.MarkersSubfolder
+            };
+
+            return d;
+        }
+
+        bool TryParseBoolFlexible(string value, out bool result)
+        {
+            result = false;
+            if (bool.TryParse(value, out result))
+                return true;
+
+            if (string.IsNullOrWhiteSpace(value))
+                return false;
+
+            value = value.Trim().ToLowerInvariant();
+
+            switch (value)
+            {
+                case "1":
+                case "yes":
+                case "y":
+                case "on":
+                case "enable":
+                case "enabled":
+                    result = true;
+                    return true;
+
+                case "0":
+                case "no":
+                case "n":
+                case "off":
+                case "disable":
+                case "disabled":
+                    result = false;
+                    return true;
+            }
+
+            return false;
+        }
+
 
         // Attempts to set +x permission on a file under Linux and confirms executability.
         private bool TrySetExecutableUnix(string path)
@@ -2910,6 +3306,8 @@ namespace Oxide.Plugins
                 }
             }
 
+            SetWipeUnixTimestampOverrideFromConfig();
+
             if (checkTimer == null) StartPeriodicCheck();
         }
 
@@ -3036,6 +3434,7 @@ namespace Oxide.Plugins
                     { "-nextwipeseed", configData.NextWipeSeed ?? "" },
                     { "-nextwipemapsize", configData.NextWipeMapsize ?? "" },
                     { "-nextwipekeepbps", configData.NextWipeKeepBps ? "1" : "0" },
+                    { "-nextwiperesetrustplus", configData.NextWipeResetRustPlus ? "1" : "0" },
                     { "-nextwipedelplayerdata", configData.NextWipeDeletePlayerData ? "1" : "0" },
                     { "-nextwipedelpluginsdata", pluginDatafilesToRemoveString ?? "" },
                     { "-serveridentity", configData.ServerIdentity ?? "" },
@@ -3168,6 +3567,71 @@ namespace Oxide.Plugins
         #endregion
 
         #region Wipe Helpers
+
+        //compute unix timestamp is UTC and apply it to wipeUnixTimestampOverride, then calls server.writecfg and server.readcfg.
+        private void SetWipeUnixTimestampOverrideFromConfig()
+        {
+            try
+            {
+                var dayRaw = configData?.CustomWipeDay;
+                var timeRaw = configData?.CustomWipeTime;
+
+                if (string.IsNullOrWhiteSpace(dayRaw) || string.IsNullOrWhiteSpace(timeRaw))
+                {
+                    Puts("SetWipeUnixTimestampOverrideStrict: CustomWipeDay or CustomWipeTime missing/empty; aborted.");
+                    return;
+                }
+
+                string[] dateFormats = { "d/M/yyyy", "dd/MM/yyyy", "d/MM/yyyy", "dd/M/yyyy" };
+                dayRaw = dayRaw.Trim().Replace('-', '/');
+
+                if (!DateTime.TryParseExact(dayRaw, dateFormats, CultureInfo.InvariantCulture, DateTimeStyles.None, out DateTime datePart))
+                {
+                    Puts($"SetWipeUnixTimestampOverrideStrict: CustomWipeDay '{configData.CustomWipeDay}' does not match required formats.");
+                    return;
+                }
+
+                string[] timeFormats = { "H:mm", "HH:mm" };
+                if (!DateTime.TryParseExact(timeRaw.Trim(), timeFormats, CultureInfo.InvariantCulture, DateTimeStyles.None, out DateTime timePart))
+                {
+                    Puts($"SetWipeUnixTimestampOverrideStrict: CustomWipeTime '{configData.CustomWipeTime}' does not match required formats.");
+                    return;
+                }
+
+                var targetLocalUnspecified = new DateTime(
+                    datePart.Year, datePart.Month, datePart.Day,
+                    timePart.Hour, timePart.Minute, 0,
+                    DateTimeKind.Unspecified
+                );
+
+                DateTime targetUtc;
+                try
+                {
+                    targetUtc = TimeZoneInfo.ConvertTimeToUtc(targetLocalUnspecified, TimeZoneInfo.Local);
+                }
+                catch (Exception convEx)
+                {
+                    Puts($"SetWipeUnixTimestampOverrideStrict: UTC conversion error: {convEx.Message}. Aborted.");
+                    return;
+                }
+
+                long unixTs = (long)(targetUtc - DateTime.UnixEpoch).TotalSeconds;
+                if (unixTs <= 0)
+                {
+                    Puts($"SetWipeUnixTimestampOverrideStrict: computed timestamp '{unixTs}' is invalid; aborted.");
+                    return;
+                }
+
+                Puts($"SetWipeUnixTimestampOverrideStrict: setting wipeUnixTimestampOverride={unixTs} (UTC={targetUtc:yyyy-MM-dd HH:mm:ss}).");
+                ConsoleSystem.Run(ConsoleSystem.Option.Server, $"wipeUnixTimestampOverride {unixTs}");
+                ConsoleSystem.Run(ConsoleSystem.Option.Server, "server.writecfg");
+                ConsoleSystem.Run(ConsoleSystem.Option.Server, "server.readcfg");
+            }
+            catch (Exception ex)
+            {
+                Puts("SetWipeUnixTimestampOverrideStrict: unexpected error: " + ex.Message);
+            }
+        }
 
         // Calculates minutes until the official monthly force wipe (first Thursday 19:00 UTC).
         private (int minutesRemaining, DateTime nextWipeUtc, DateTime nextWipeInServerTz) MinutesUntilMonthlyForceWipe(TimeZoneInfo tz = null)
