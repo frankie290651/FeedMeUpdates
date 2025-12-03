@@ -122,6 +122,7 @@ namespace FeedMeUpdates
         public static string NextWipeSeed = "";
         public static string NextWipeMapsize = "";
         public static bool NextWipeKeepBps = false;
+        public static bool NextWipeResetRustPlus = false;
         public static bool NextWipeDeletePlayerData = false;
         public static string NextWipeDelPluginsData = "";
         public static List<string> PdataFilesToDelete = new List<string>();
@@ -209,6 +210,7 @@ namespace FeedMeUpdates
             parsed.TryGetValue("nextwipeseed", out var nextWipeSeedVal);
             parsed.TryGetValue("nextwipemapsize", out var nextWipeMapsizeVal);
             parsed.TryGetValue("nextwipekeepbps", out var nextWipeKeepBpsVal);
+            parsed.TryGetValue("nextwiperesetrustplus", out var nextWipeResetRustPlusVal);
             parsed.TryGetValue("nextwipedelplayerdata", out var nextWipeDelPlayerDataVal);
             parsed.TryGetValue("nextwipedelpluginsdata", out var nextWipeDelPluginsDataVal);
             parsed.TryGetValue("serveridentity", out var serverIdentityVal);
@@ -236,6 +238,7 @@ namespace FeedMeUpdates
             RunState.NextWipeSeed = nextWipeSeedVal ?? "";
             RunState.NextWipeMapsize = nextWipeMapsizeVal ?? "";
             RunState.NextWipeKeepBps = ParseBool(nextWipeKeepBpsVal);
+            RunState.NextWipeResetRustPlus = ParseBool(nextWipeResetRustPlusVal);
             RunState.NextWipeDeletePlayerData = ParseBool(nextWipeDelPlayerDataVal);
             RunState.NextWipeDelPluginsData = nextWipeDelPluginsDataVal ?? "";
             RunState.ServerIdentity = serverIdentityVal ?? "";
@@ -1003,13 +1006,16 @@ namespace FeedMeUpdates
         private static bool AutoUpdateTask()
         {
             string pFile = "";
+            string pGuiFile = "";
             if (RuntimeInformation.IsOSPlatform(OSPlatform.Windows))
             {
                 pFile = RunState.ServerDir + @"\oxide\plugins\FeedMeUpdates.cs";
+                pGuiFile = RunState.ServerDir + @"\oxide\plugins\FeedMeUpdatesGUI.cs";
             }
             else
             {
                 pFile = RunState.ServerDir + "/oxide/plugins/FeedMeUpdates.cs";
+                pGuiFile = RunState.ServerDir + "/oxide/plugins/FeedMeUpdatesGUI.cs";
             }
             var meta = ParseInfoAttribute(pFile);
             if (meta == null)
@@ -1103,7 +1109,12 @@ namespace FeedMeUpdates
                                     File.Delete(pFile);
                                     File.Move(file, pFile);
                                 }
-                                if(file.EndsWith("FeedMeUpdates") || file.EndsWith("FeedMeUpdates.exe"))
+                                if (file.EndsWith("FeedMeUpdatesGUI.cs"))
+                                {
+                                    File.Delete(pGuiFile);
+                                    File.Move(file, pGuiFile);
+                                }
+                                if (file.EndsWith("FeedMeUpdates") || file.EndsWith("FeedMeUpdates.exe"))
                                 {
                                     if (RuntimeInformation.IsOSPlatform(OSPlatform.Windows))
                                     {
@@ -3387,6 +3398,26 @@ namespace FeedMeUpdates
                     wipingInfo += "[" + "No players blueprint db found. Please check manually." + "]";
                 }
             }
+            if (RunState.NextWipeResetRustPlus)
+            {
+                Logger.Info("WIPE-CYCLE: Removing Rust+ token database.");
+                localFiles = Directory.GetFiles(sDataDir);
+                bool _found = false;
+                foreach (string file in localFiles)
+                {
+                    if (file.Contains(".tokens"))
+                    {
+                        _found = true;
+                        File.Delete(file);
+                        Logger.Info("WIPE-CYCLE: Rust+ token database deleted.");
+                    }
+                }
+                if (!_found)
+                {
+                    Logger.Warn("WIPE-CYCLE: CAUTION! No Rust+ token database found. Please check manually.");
+                    wipingInfo += "[" + "No Rust+ token database found. Please check manually." + "]";
+                }
+            }
             if (RunState.NextWipeDeletePlayerData)
             {
                 Logger.Info("WIPE-CYCLE: Removing players data.");
@@ -3394,7 +3425,7 @@ namespace FeedMeUpdates
                 bool _found = false;
                 foreach (string file in localFiles)
                 {
-                    if (file.Contains(".deaths") || file.Contains(".identities") || file.Contains(".states") || file.Contains(".tokens") || file.Contains("relationship") || file.Contains(".files"))
+                    if (file.Contains(".deaths") || file.Contains(".identities") || file.Contains(".states") || file.Contains("relationship") || file.Contains(".files"))
                     {
                         _found = true;
                         File.Delete(file);
@@ -3427,6 +3458,22 @@ namespace FeedMeUpdates
             string cfgpath = cfgDir + sp + "server.cfg";
             string _errorText = "";
             bool kvchanged = false;
+            Logger.Info("WIPE-CYCLE: Removing wipeUnixTimestampOverride from server.cfg");
+            kvchanged = TryRemoveConfigValue(cfgpath, "wipeUnixTimestampOverride", out _errorText);
+            if (kvchanged)
+            {
+                Logger.Info("WIPE-CYCLE: wipeUnixTimestampOverride value removed.");
+            }
+            else
+            {
+                if (!string.IsNullOrEmpty(_errorText))
+                {
+                    Logger.Warn("WIPE-CYCLE: CAUTION! wipeUnixTimestampOverride not removed (error: " + _errorText + ")");
+                    wipingInfo += "[" + "wipeUnixTimestampOverride not removed (error: " + _errorText + ")" + "]";
+                }
+            }
+            _errorText = "";
+            kvchanged = false;
             if (!string.IsNullOrEmpty(RunState.ServerName))
             {
                 kvchanged = TryUpdateConfigValue(cfgpath, "server.hostname", RunState.ServerName, true, out _errorText);
