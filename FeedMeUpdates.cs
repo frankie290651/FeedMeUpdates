@@ -3786,7 +3786,25 @@ namespace Oxide.Plugins
 
                 if (string.IsNullOrWhiteSpace(dayRaw) || string.IsNullOrWhiteSpace(timeRaw))
                 {
-                    Puts("SetWipeUnixTimestampOverrideStrict: CustomWipeDay or CustomWipeTime missing/empty; aborted.");
+                    var (minutesRemaining, nextWipeUtc, nextWipeLocal) = MinutesUntilMonthlyForceWipe();
+
+                    if (nextWipeUtc == default(DateTime))
+                    {
+                        Puts("Fallback wipe override: unable to estimate next force wipe date.");
+                        return;
+                    }
+
+                    long unixTs = (long)(nextWipeUtc - DateTime.UnixEpoch).TotalSeconds;
+                    if (unixTs <= 0)
+                    {
+                        Puts($"Fallback wipe override: timestamp is invalid ({unixTs}).");
+                        return;
+                    }
+
+                    Puts($"Fallback wipe override: setting convar wipeUnixTimestampOverride={unixTs} (UTC={nextWipeUtc:yyyy-MM-dd HH:mm:ss}, Local={nextWipeLocal:yyyy-MM-dd HH:mm:ss}).");
+                    ConsoleSystem.Run(ConsoleSystem.Option.Server, $"wipeUnixTimestampOverride {unixTs}");
+                    ConsoleSystem.Run(ConsoleSystem.Option.Server, "server.writecfg");
+                    ConsoleSystem.Run(ConsoleSystem.Option.Server, "server.readcfg");
                     return;
                 }
 
