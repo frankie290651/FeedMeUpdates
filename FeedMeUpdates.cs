@@ -89,6 +89,14 @@ namespace Oxide.Plugins
         #endregion
 
         #region Runtime State
+		
+		
+		private bool? lastOxideCompat = null;
+		private string lastOxideProto = null;
+		private string lastCompatNote = null;
+
+        private bool debugging = false;
+		private bool quitBeforeExecOnDebugging = true;
 
         private bool enablePlugin = true;
 
@@ -1412,6 +1420,9 @@ namespace Oxide.Plugins
                 try
                 {
                     remoteOxide = GetRemoteOxideVersion();
+                    if(debugging)
+						Puts("[UpdateLogics Cycle] Remote Oxide: " + remoteOxide);
+					
                     if (string.IsNullOrEmpty(remoteOxide))
                     {
                         return new bool[] { false, false, shithappens };
@@ -1429,7 +1440,12 @@ namespace Oxide.Plugins
                 {
                     OxideChanged = true;
                 }
-
+                if(debugging)
+				{
+					string DisplayRemOx = NormalizeVersionString(remoteOxide);
+					string DisplayLocOx = NormalizeVersionString(localOxideVersion);
+					Puts("[UpdateLogics Cycle] Oxide changed set to: " + OxideChanged.ToString() + " (" + DisplayRemOx + " vs " + DisplayLocOx + ")");
+                }
                 bool ServerChanged = false;
                 string remoteBuild = null;
 
@@ -1443,6 +1459,9 @@ namespace Oxide.Plugins
                     try
                     {
                         remoteBuild = GetRemoteRustBuild();
+                        if(debugging)
+							Puts("[UpdateLogics Cycle] Remote Server: " + remoteBuild);
+                        
                         if (string.IsNullOrEmpty(remoteBuild))
                         {
                             return false;
@@ -1460,6 +1479,9 @@ namespace Oxide.Plugins
                         throw new Exception("LocalSteamBuildID empty");
                     }
 
+                    if(debugging)
+						Puts("[UpdateLogics Cycle] Server changed set to: " + (remoteBuild != LocalSteamBuildID).ToString() + " (" + remoteBuild + " vs " + LocalSteamBuildID + ")");
+                    
                     return remoteBuild != LocalSteamBuildID;
                 };
 
@@ -1698,11 +1720,41 @@ namespace Oxide.Plugins
         private string ParseBuildId(string steamOutput)
         {
             if (string.IsNullOrEmpty(steamOutput)) return null;
-            var publicBuildMatch = Regex.Match(steamOutput, @"public\s*\{[\s\S]*?""buildid""\s*""([0-9]{5,12})""", RegexOptions.IgnoreCase);
-            if (publicBuildMatch.Success && publicBuildMatch.Groups.Count >= 2)
+
+            int idxBranches = steamOutput.IndexOf("\"branches\"", StringComparison.OrdinalIgnoreCase);
+            if (idxBranches < 0) return null;
+            int openBranches = steamOutput.IndexOf('{', idxBranches);
+            if (openBranches < 0) return null;
+            string branchesBlock = ExtractBalancedBlock(steamOutput, openBranches);
+            if (branchesBlock == null) return null;
+
+            int idxPublic = branchesBlock.IndexOf("\"public\"", StringComparison.OrdinalIgnoreCase);
+            if (idxPublic < 0) return null;
+            int openPublic = branchesBlock.IndexOf('{', idxPublic);
+            if (openPublic < 0) return null;
+            string publicBlock = ExtractBalancedBlock(branchesBlock, openPublic);
+            if (publicBlock == null) return null;
+
+            var m = Regex.Match(publicBlock, "\"buildid\"\\s*\"([0-9]{5,12})\"", RegexOptions.IgnoreCase);
+            return m.Success ? m.Groups[1].Value : null;
+        }
+
+        //Helper for ParseBuildId, used to extract a block from the output
+        private string ExtractBalancedBlock(string text, int openIndex)
+        {
+            if (openIndex < 0 || openIndex >= text.Length || text[openIndex] != '{') return null;
+
+            int depth = 0;
+            for (int i = openIndex; i < text.Length; i++)
             {
-                var build = publicBuildMatch.Groups[1].Value;
-                return build;
+                char c = text[i];
+                if (c == '{') depth++;
+                else if (c == '}')
+                {
+                    depth--;
+                    if (depth == 0)
+                        return text.Substring(openIndex, i - openIndex + 1);
+                }
             }
             return null;
         }
@@ -1799,7 +1851,22 @@ namespace Oxide.Plugins
 
         #region Compatibility Check
 
-        // Determines whether a remote Oxide tag matches the local Rust protocol version.
+        //Cleaning procedure for GetOxideCompatibilityInfo
+        private string CleanRef(string s)
+        {
+            if (string.IsNullOrEmpty(s)) return s;
+            var forbidden = new HashSet<char> { '\u200B', '\u200C', '\u200D', '\uFEFF', '\u2060' };
+            var sb = new StringBuilder(s.Length);
+            foreach (var ch in s)
+            {
+                if (char.IsControl(ch)) continue;
+                if (forbidden.Contains(ch)) continue;
+                sb.Append(ch);
+            }
+            return sb.ToString().Trim();
+        }
+
+        //Determine if a remote oxide version is compatible with local server (returns false if protocol changed or true if not)
         private bool? GetOxideCompatibilityInfo(string oxideTag, out string localProto, out string oxideProto, out string note)
         {
             localProto = localProtocol;
@@ -1809,32 +1876,91 @@ namespace Oxide.Plugins
             if (string.IsNullOrEmpty(oxideTag)) { note = "no oxide tag"; return null; }
             if (string.IsNullOrEmpty(localProto)) { note = "local protocol unknown"; return null; }
 
+            oxideTag = CleanRef(oxideTag);
+
+            if (!string.IsNullOrEmpty(cachedRemoteOxide) && oxideTag == cachedRemoteOxide && lastOxideCompat.HasValue)
+            {
+                oxideProto = lastOxideProto;
+                note = lastCompatNote;
+                return lastOxideCompat;
+            }
+
+            var variants = new List<string> { oxideTag };
+            if (!oxideTag.StartsWith("v", StringComparison.OrdinalIgnoreCase)) variants.Add("v" + oxideTag);
+            else variants.Add(oxideTag.Substring(1));
+
+            var prevBackend = currentHttpBackend;
+            currentHttpBackend = HttpBackend.WebClient;
+            int timeout = configData.HttpTimeoutMs;
+
             try
             {
-                int timeout = configData.HttpTimeoutMs > 0 ? configData.HttpTimeoutMs : 3000;
-                string commitUrl = $"https://api.github.com/repos/OxideMod/Oxide.Rust/commits/{WebUtility.UrlEncode(oxideTag)}";
-                var r = ResilientHttpGetSync(commitUrl, null, timeout);
                 string commitJson = null;
+                string usedVariant = null;
 
-                if (r.statusCode == 200) commitJson = r.body;
-                else
+                foreach (var varTag in variants)
                 {
-                    var relUrl = $"https://api.github.com/repos/OxideMod/Oxide.Rust/releases/tags/{WebUtility.UrlEncode(oxideTag)}";
-                    var relR = ResilientHttpGetSync(relUrl, null, timeout);
-                    if (relR.statusCode == 200 && !string.IsNullOrEmpty(relR.body))
+                    try
                     {
-                        var tc = Regex.Match(relR.body, "\"target_commitish\"\\s*:\\s*\"([^\"]+)\"", RegexOptions.IgnoreCase);
-                        var commitish = tc.Success ? tc.Groups[1].Value : null;
-                        if (!string.IsNullOrEmpty(commitish))
+                        string commitUrl = $"https://api.github.com/repos/OxideMod/Oxide.Rust/commits/{WebUtility.UrlEncode(varTag)}";
+                        var r = ResilientHttpGetSync(commitUrl, null, timeout);
+                        if (debugging)
+                            Puts($"[Compat] GET {commitUrl} => {r.statusCode} len={(r.body?.Length ?? 0)}");
+                        if (r.statusCode == 200 && !string.IsNullOrEmpty(r.body))
                         {
-                            commitUrl = $"https://api.github.com/repos/OxideMod/Oxide.Rust/commits/{WebUtility.UrlEncode(commitish)}";
-                            var commitR = ResilientHttpGetSync(commitUrl, null, timeout);
-                            if (commitR.statusCode == 200) commitJson = commitR.body;
+                            commitJson = r.body;
+                            usedVariant = varTag;
+                            break;
                         }
+
+
+                        var relUrl = $"https://api.github.com/repos/OxideMod/Oxide.Rust/releases/tags/{WebUtility.UrlEncode(varTag)}";
+                        var relR = ResilientHttpGetSync(relUrl, null, timeout);
+                        if (debugging)
+                            Puts($"[Compat] GET {relUrl} => {relR.statusCode} len={(relR.body?.Length ?? 0)}");
+                        if (relR.statusCode == 200 && !string.IsNullOrEmpty(relR.body))
+                        {
+                            var tc = Regex.Match(relR.body, "\"target_commitish\"\\s*:\\s*\"([^\"]+)\"", RegexOptions.IgnoreCase);
+                            var commitish = tc.Success ? tc.Groups[1].Value : null;
+                            if (debugging)
+                                Puts($"[Compat] releases/tags target_commitish='{commitish ?? "<null>"}'");
+                            if (!string.IsNullOrEmpty(commitish))
+                            {
+                                commitUrl = $"https://api.github.com/repos/OxideMod/Oxide.Rust/commits/{WebUtility.UrlEncode(commitish)}";
+                                var commitR = ResilientHttpGetSync(commitUrl, null, timeout);
+                                if (debugging)
+                                    Puts($"[Compat] GET {commitUrl} => {commitR.statusCode} len={(commitR.body?.Length ?? 0)}");
+                                if (commitR.statusCode == 200 && !string.IsNullOrEmpty(commitR.body))
+                                {
+                                    commitJson = commitR.body;
+                                    usedVariant = varTag;
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                    catch (Exception exVar)
+                    {
+                        if (debugging)
+                            Puts($"[Compat] Exception while trying variant '{varTag}': {exVar.Message}");
                     }
                 }
 
-                if (string.IsNullOrEmpty(commitJson)) { note = "no commit info"; return null; }
+                if (string.IsNullOrEmpty(commitJson))
+                {
+                    note = "no commit info";
+                    if (debugging)
+                    {
+                        Puts($"[UpdateLogics Cycle] Remote Oxide Comp: note=\"{note}\" (tag tried: {oxideTag})");
+                    }
+                    lastOxideCompat = null;
+                    lastOxideProto = null;
+                    lastCompatNote = note;
+                    return null;
+                }
+
+                if (debugging)
+                    Puts($"[Compat] commitJson snippet (len {commitJson.Length}): {commitJson.Substring(0, Math.Min(300, commitJson.Length)).Replace("\n", "\\n")}");
 
                 var msgMatch = Regex.Match(commitJson, "\"message\"\\s*:\\s*\"([^\"]+)\"", RegexOptions.IgnoreCase);
                 if (msgMatch.Success)
@@ -1855,13 +1981,61 @@ namespace Oxide.Plugins
                     if (anyProto.Success) oxideProto = anyProto.Groups[1].Value;
                 }
 
-                if (string.IsNullOrEmpty(oxideProto)) { note = "oxide protocol not found"; return null; }
-                if (oxideProto == localProto) { note = "protocols match"; return true; }
-                note = "protocols differ"; return false;
-            }
-            catch (Exception ex) { note = "exception: " + ex.Message; return null; }
-        }
+                if (string.IsNullOrEmpty(oxideProto))
+                {
+                    note = "oxide protocol not found";
+                    if (debugging)
+                    {
+                        Puts($"[UpdateLogics Cycle] Remote Oxide Comp: note=\"{note}\"");
+                    }
+                    lastOxideCompat = null;
+                    lastOxideProto = null;
+                    lastCompatNote = note;
+                    return null;
+                }
 
+                if (oxideProto == localProto)
+                {
+                    note = "protocols match";
+                    if (debugging)
+                    {
+                        Puts($"[UpdateLogics Cycle] Remote Oxide Comp: oxideProto=\"{oxideProto}\"");
+                        Puts($"[UpdateLogics Cycle] Remote Oxide Comp: note=\"{note}\"");
+                    }
+                    lastOxideCompat = true;
+                    lastOxideProto = oxideProto;
+                    lastCompatNote = note;
+                    return true;
+                }
+
+                note = "protocols differ";
+                if (debugging)
+                {
+                    Puts($"[UpdateLogics Cycle] Remote Oxide Comp: oxideProto=\"{oxideProto}\"");
+                    Puts($"[UpdateLogics Cycle] Remote Oxide Comp: note=\"{note}\"");
+                }
+                lastOxideCompat = false;
+                lastOxideProto = oxideProto;
+                lastCompatNote = note;
+                return false;
+            }
+            catch (Exception ex)
+            {
+                note = "exception: " + ex.Message;
+                if (debugging)
+                {
+                    Puts("[UpdateLogics Cycle] Remote Oxide Comp error: " + note);
+                }
+                lastOxideCompat = null;
+                lastOxideProto = null;
+                lastCompatNote = note;
+                return null;
+            }
+            finally
+            {
+                currentHttpBackend = prevBackend;
+            }
+        }
         #endregion
 
         #region Countdown & Updater Launch
@@ -1893,10 +2067,18 @@ namespace Oxide.Plugins
             Action tick = null;
             tick = () =>
             {
+                remaining--;
                 if (remaining <= 0)
                 {
                     string remoteBuildArg = pendingServerUpdate ? remoteBuild : null;
                     string remoteOxideArg = pendingOxideUpdate ? remoteOxide : null;
+
+                    
+					if(debugging)
+					{
+							Puts("[Countdown] remoteBuildArg=" + remoteBuildArg + " pendingServerUpdate=" + pendingServerUpdate.ToString() + " remoteBuild=" + remoteBuild);
+							Puts("[Countdown] remoteOxideArg=" + remoteOxideArg + " pendingOxideUpdate=" + pendingOxideUpdate.ToString() + " remoteOxide=" + remoteOxide);
+                    }
 
                     StartUpdaterExecutable(updateServer: pendingServerUpdate, updateOxide: pendingOxideUpdate, remoteBuildArg: remoteBuildArg, remoteOxideArg: remoteOxideArg);
 
@@ -1910,7 +2092,13 @@ namespace Oxide.Plugins
                     BroadcastToPlayers($"ATTENTION: server will restart for update in {remaining} minute(s).");
                 else
                     BroadcastToPlayers($"ATTENTION: server will restart for monthly force wipe in {remaining} minute(s).");
-                remaining--;
+
+                
+				if(debugging)
+				{
+					Puts("[Countdown] pendingServerUpdate=" + pendingServerUpdate.ToString() + " remoteBuild=" + remoteBuild);
+					Puts("[Countdown] pendingOxideUpdate=" + pendingOxideUpdate.ToString() + " remoteOxide=" + remoteOxide);
+                }
                 timer.Once(60f, tick);
             };
 
@@ -1936,12 +2124,31 @@ namespace Oxide.Plugins
 
                 bool protocolChanged = false;
                 string remoteOxideVersion = remoteOxideArg;
+				
+                if(debugging)
+				{
+					string DumpHex(string s) => s == null ? "<null>" : string.Join(" ", s.Select(c => ((int)c).ToString("X2")));
+					Puts($"[StartExe] remoteOxideArg len={remoteOxideArg?.Length ?? 0} hex=[{DumpHex(remoteOxideArg)}]");
+					Puts($"[StartExe] encoded={System.Web.HttpUtility.UrlEncode(remoteOxideArg ?? "")}");
+				}
                 if (updateOxide && !string.IsNullOrEmpty(remoteOxideVersion))
                 {
                     string _localProto, _oxideProto, _note;
                     var compat = GetOxideCompatibilityInfo(remoteOxideVersion, out _localProto, out _oxideProto, out _note);
                     protocolChanged = compat.HasValue && compat.Value == false;
                 }
+
+                
+                if (debugging)
+                {
+                    Puts("[StartExe] protocolChanged=" + protocolChanged.ToString() + " remoteOxideVersion=" + remoteOxideVersion + " remoteOxideArg=" + remoteOxideArg);
+					if(quitBeforeExecOnDebugging)
+					{
+						PerformSaveAndQuitGracefully();
+						return;
+					}
+                }
+                
                 NotifyDiscordUpdateStart(updateServer, updateOxide, remoteOxideVersion, protocolChanged);
 
                 if (string.IsNullOrEmpty(exePath))
@@ -3284,6 +3491,7 @@ namespace Oxide.Plugins
                     string remoteOxideArg = updateOxide ? remoteOxide : null;
 
                     Puts($"StartupScan: updates available (server={updateServer}, oxide={updateOxide}) -> launching updater immediately (what={what}).");
+					
                     StartUpdaterExecutable(updateServer: updateServer, updateOxide: updateOxide, overrideUpdateId: null, overrideWhat: what, remoteBuildArg: remoteBuildArg, remoteOxideArg: remoteOxideArg);
 
                     Puts("StartupScan: scheduling graceful save+quit after updater start.");
