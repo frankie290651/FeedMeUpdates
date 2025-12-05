@@ -3781,6 +3781,7 @@ namespace Oxide.Plugins
         {
             try
             {
+                long unixTs = 0;
                 var dayRaw = configData?.CustomWipeDay;
                 var timeRaw = configData?.CustomWipeTime;
 
@@ -3794,7 +3795,7 @@ namespace Oxide.Plugins
                         return;
                     }
 
-                    long unixTs = (long)(nextWipeUtc - DateTime.UnixEpoch).TotalSeconds;
+                    unixTs = (long)(nextWipeUtc - DateTime.UnixEpoch).TotalSeconds;
                     if (unixTs <= 0)
                     {
                         Puts($"Fallback wipe override: timestamp is invalid ({unixTs}).");
@@ -3841,7 +3842,7 @@ namespace Oxide.Plugins
                     return;
                 }
 
-                long unixTs = (long)(targetUtc - DateTime.UnixEpoch).TotalSeconds;
+                unixTs = (long)(targetUtc - DateTime.UnixEpoch).TotalSeconds;
                 if (unixTs <= 0)
                 {
                     Puts($"SetWipeUnixTimestampOverrideStrict: computed timestamp '{unixTs}' is invalid; aborted.");
