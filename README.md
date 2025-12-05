@@ -192,6 +192,7 @@ Plus many resiliency improvements:
   "NextWipeRandomSeed": false,
   "NextWipeMapsize": "",
   "NextWipeKeepBps": true,
+  "NextWipeResetRustPlus": false,
   "NextWipeDeletePlayerData": false,
   "NextWipeDeletePluginDatafiles": "",
 
@@ -239,6 +240,7 @@ Plus many resiliency improvements:
   - NextWipeLevel / NextWipeSeed / NextWipeMapsize: Map parameters (validated; size must be 1000–6000).
   - NextWipeRandomSeed: If true, FMU generates a uint seed and sets it at wipe.
   - NextWipeKeepBps: Keep blueprints if true; otherwise delete BP DB.
+  - NextWipeResetRustPlus: Wipe player.token.db if true.
   - NextWipeDeletePlayerData: Delete player data files.
   - NextWipeDeletePluginDatafiles: JSON array (as string) of plugin .json/.data files to delete from `oxide/data` at wipe.
 
@@ -277,6 +279,7 @@ Notes:
 - FMU computes the official force wipe date/time: first Thursday of each month at 19:00 UTC.
 - When the remaining time is within `BeforeForceWipeRange` minutes (default 15), the plugin prepares and triggers a force wipe cycle.
 - Countdown messages clearly mention force wipe.
+- Automatically sets the right value for the convar wipetimer.wipeUnixTimestampOverride
 
 ### Custom Wipe
 - Set `CustomWipeDay` (e.g., `05/12/2025`) and `CustomWipeTime` (e.g., `23:30`) in local time to schedule a one‑off wipe between force wipes.
