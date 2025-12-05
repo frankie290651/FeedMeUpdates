@@ -1973,75 +1973,16 @@ namespace FeedMeUpdates
 
                 try
                 {
-                    var publicBuildMatch = Regex.Match(outp, @"public\s*\{[\s\S]*?""buildid""\s*""([0-9]{5,12})""", RegexOptions.IgnoreCase);
-                    if (publicBuildMatch.Success && publicBuildMatch.Groups.Count >= 2)
+                    string? buildmatch = ParseBuildId(outp);
+                    if (!string.IsNullOrEmpty(buildmatch))
                     {
-                        var build = publicBuildMatch.Groups[1].Value;
-                        Logger.Info($"GetRemoteRustBuild: detected build id in branches->public: {build}");
-                        return build;
+                        Logger.Info($"GetRemoteRustBuild: detected build id in branches->public: {buildmatch}");
+                        return buildmatch;
                     }
                 }
                 catch (Exception ex)
                 {
                     Logger.Warn($"GetRemoteRustBuild: error while parsing public buildid: {ex.Message}");
-                }
-
-                try
-                {
-                    var matches = Regex.Matches(outp, @"""buildid""\s*""([0-9]{5,12})""", RegexOptions.IgnoreCase);
-                    if (matches.Count > 0)
-                    {
-                        for (int i = 0; i < matches.Count; i++)
-                        {
-                            var idx = matches[i].Index;
-                            var windowStart = Math.Max(0, idx - 200);
-                            var len = Math.Min(200, outp.Length - windowStart);
-                            var ctx = outp.Substring(windowStart, len);
-                            if (ctx.IndexOf("branches", StringComparison.OrdinalIgnoreCase) >= 0)
-                            {
-                                var cand = matches[i].Groups[1].Value;
-                                Logger.Info($"GetRemoteRustBuild: detected build id (fallback, near 'branches'): {cand}");
-                                return cand;
-                            }
-                        }
-
-                        var first = matches[0].Groups[1].Value;
-                        Logger.Info($"GetRemoteRustBuild: detected build id (fallback any buildid): {first}");
-                        return first;
-                    }
-                }
-                catch (Exception ex)
-                {
-                    Logger.Warn($"GetRemoteRustBuild: fallback parsing error: {ex.Message}");
-                }
-
-                try
-                {
-                    var anyNum = Regex.Matches(outp, @"\b([0-9]{6,10})\b");
-                    if (anyNum.Count > 0)
-                    {
-                        for (int i = 0; i < anyNum.Count; i++)
-                        {
-                            var idx = anyNum[i].Index;
-                            var windowStart = Math.Max(0, idx - 200);
-                            var len = Math.Min(200, outp.Length - windowStart);
-                            var ctx = outp.Substring(windowStart, len).ToLowerInvariant();
-                            if (ctx.Contains("buildid") || ctx.Contains("branches") || ctx.Contains("release"))
-                            {
-                                var cand = anyNum[i].Groups[1].Value;
-                                Logger.Info($"GetRemoteRustBuild: detected build id (last-resort heuristic): {cand}");
-                                return cand;
-                            }
-                        }
-
-                        var f = anyNum[0].Groups[1].Value;
-                        Logger.Info($"GetRemoteRustBuild: detected build id (last-resort numeric): {f}");
-                        return f;
-                    }
-                }
-                catch (Exception ex)
-                {
-                    Logger.Warn($"GetRemoteRustBuild: final numeric fallback error: {ex.Message}");
                 }
 
                 Logger.Warn("GetRemoteRustBuild: could not determine build id from steamcmd output.");
@@ -2052,6 +1993,49 @@ namespace FeedMeUpdates
                 Logger.Error($"GetRemoteRustBuild: exception: {ex.Message}");
                 return "no";
             }
+        }
+
+        // Parses the build ID from steamcmd's app_info_print output.
+        private static string? ParseBuildId(string steamOutput)
+        {
+            if (string.IsNullOrEmpty(steamOutput)) return null;
+
+            int idxBranches = steamOutput.IndexOf("\"branches\"", StringComparison.OrdinalIgnoreCase);
+            if (idxBranches < 0) return null;
+            int openBranches = steamOutput.IndexOf('{', idxBranches);
+            if (openBranches < 0) return null;
+            string? branchesBlock = ExtractBalancedBlock(steamOutput, openBranches);
+            if (branchesBlock == null) return null;
+
+            int idxPublic = branchesBlock.IndexOf("\"public\"", StringComparison.OrdinalIgnoreCase);
+            if (idxPublic < 0) return null;
+            int openPublic = branchesBlock.IndexOf('{', idxPublic);
+            if (openPublic < 0) return null;
+            string? publicBlock = ExtractBalancedBlock(branchesBlock, openPublic);
+            if (publicBlock == null) return null;
+
+            var m = Regex.Match(publicBlock, "\"buildid\"\\s*\"([0-9]{5,12})\"", RegexOptions.IgnoreCase);
+            return m.Success ? m.Groups[1].Value : null;
+        }
+
+        //Helper for ParseBuildId, used to extract a block from the output
+        private static string? ExtractBalancedBlock(string text, int openIndex)
+        {
+            if (openIndex < 0 || openIndex >= text.Length || text[openIndex] != '{') return null;
+
+            int depth = 0;
+            for (int i = openIndex; i < text.Length; i++)
+            {
+                char c = text[i];
+                if (c == '{') depth++;
+                else if (c == '}')
+                {
+                    depth--;
+                    if (depth == 0)
+                        return text.Substring(openIndex, i - openIndex + 1);
+                }
+            }
+            return null;
         }
 
         // Fetch latest Oxide release tag and select an asset URL.
